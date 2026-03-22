@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tightbeam — LLM proxy for containerized AI agents</title>
+  <meta name="description" content="LLM proxy for containerized AI agents. Proxies API calls through a unix socket without mounting credentials into the container.">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <style>
+    pre.diagram { line-height: 1; }
+  </style>
+</head>
+<body class="bg-black text-white font-mono antialiased">
+
+  <div class="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8 py-12">
+
+    <!-- Hero -->
+    <section class="mb-20">
+      <pre class="text-white text-xs sm:text-sm mb-8 select-none" style="line-height:1.1" aria-label="TIGHTBEAM">
+▀▀█▀▀ ▀█▀ ░█▀▀█ ░█  ░█ ▀▀█▀▀ ░█▀▀▄ ░█▀▀▀ ░█▀▀█  ░█▀▄▀█
+ ░█   ░█  ░█ ▄▄ ░█▀▀▀█  ░█   ░█▀▀█ ░█▀▀  ░█▀▀█  ░█░█░█
+ ░█   ▄█▄ ░█▄▄█ ░█  ░█  ░█   ░█▄▄▀ ░█▄▄▄ ░█ ░█  ░█  ░█
+      </pre>
+
+      <p class="text-lg sm:text-xl font-medium text-gray-300 mb-3">
+        LLM proxy for containerized AI agents.
+      </p>
+      <p class="text-sm text-gray-500 mb-8 leading-relaxed">
+        Proxies LLM API calls from container to host over a unix socket. Credentials stay on the host. The agent sends messages, tightbeam attaches the API key and manages conversation history. The agent never sees the key, the model, or the provider.
+      </p>
+
+      <div class="relative group mb-6">
+        <pre class="bg-zinc-900 border border-white/10 px-4 py-3 text-sm overflow-x-auto"><code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/calebfaruki/tightbeam/main/install.sh | sh</code></pre>
+        <button onclick="navigator.clipboard.writeText(document.getElementById('install-cmd').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1500)})"
+          class="absolute top-2 right-2 text-xs text-gray-500 hover:text-white border border-white/10 px-2 py-1 transition-colors">copy</button>
+      </div>
+
+      <a href="https://github.com/calebfaruki/tightbeam" class="text-sm text-gray-500 hover:text-white transition-colors">github.com/calebfaruki/tightbeam</a>
+    </section>
+
+    <!-- The problem -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">The problem</h2>
+
+      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed mb-8"><span class="text-gray-600"># "Just pass the API key"</span>
+docker run -e ANTHROPIC_API_KEY=sk-ant-... agent-image
+
+<span class="text-gray-600"># "Just set the token"</span>
+docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
+
+      <p class="text-sm text-gray-400 leading-relaxed">
+        Your API key is an environment variable inside the container. The agent can read it, exfiltrate it, and use it for anything &mdash; any model, any prompt, any volume of requests. No scoping, no audit trail, no conversation ownership.
+      </p>
+    </section>
+
+    <!-- The solution -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">The solution</h2>
+
+      <p class="text-sm text-gray-300 mb-8">
+        Credentials stay on the host. A daemon proxies LLM calls over a unix socket.
+      </p>
+
+      <div class="grid sm:grid-cols-2 gap-0 mb-8 text-sm">
+        <div class="border border-white/10 bg-zinc-900 px-5 py-4">
+          <div class="text-gray-300 font-medium mb-3">Container</div>
+          <div class="text-gray-500 space-y-1">
+            <div>agent sends <span class="text-gray-400">llm_call</span></div>
+            <div class="text-gray-600 pl-4">&darr;</div>
+            <div>tightbeam writes to socket</div>
+            <div class="text-gray-600 pl-4">&darr;</div>
+            <div>streams response to stdout</div>
+          </div>
+        </div>
+        <div class="border border-white/10 sm:border-l-0 bg-zinc-900 px-5 py-4">
+          <div class="text-gray-300 font-medium mb-3">Host</div>
+          <div class="text-gray-500 space-y-1">
+            <div>tightbeam daemon receives from socket</div>
+            <div class="text-gray-600 pl-4">&darr;</div>
+            <div>attaches API key, forwards to provider</div>
+            <div class="text-gray-600 pl-4">&darr;</div>
+            <div>streams from <span class="text-gray-400">api.anthropic.com</span></div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- Different layers -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Different layers for different problems</h2>
+
+      <p class="text-sm text-gray-400 mb-8 leading-relaxed">
+        Every agent framework &mdash; LangChain, CrewAI, OpenAI Agents SDK, Claude Code &mdash; gives the agent the API key directly. The agent holds the credential, manages its own conversation history, and calls the LLM over HTTPS. MCP sandboxes like NemoClaw and Docker MCP Toolkit isolate tool servers, but the agent still holds the LLM key itself. Nobody separates the agent from the API credential.
+      </p>
+
+      <div class="grid sm:grid-cols-2 gap-8">
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Standard agent frameworks</h3>
+          <ul class="space-y-2 text-sm text-gray-500">
+            <li>Agent holds API key as an env var</li>
+            <li>Agent manages its own conversation state</li>
+            <li>Agent calls the LLM directly over HTTPS</li>
+            <li>No audit trail outside the agent's control</li>
+          </ul>
+        </div>
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Tightbeam</h3>
+          <ul class="space-y-2 text-sm text-gray-400">
+            <li>API key lives on the host, never in the container</li>
+            <li>Host logs every exchange to NDJSON</li>
+            <li>Agent sends messages over a unix socket &mdash; no HTTPS, no credential</li>
+            <li>Provider and model are swappable without changing agent code</li>
+          </ul>
+        </div>
+      </div>
+
+      <p class="text-xs text-gray-600 mt-6">
+        Use MCP sandboxes for tool server isolation. Use Tightbeam for LLM API isolation.
+      </p>
+    </section>
+
+    <!-- Tool loop -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">One connection, one session</h2>
+
+      <p class="text-sm text-gray-400 mb-8 leading-relaxed">
+        The shim connects once. The entire tool loop &mdash; <code class="text-gray-300">llm_call</code>, tool execution, <code class="text-gray-300">tool_result</code>, next <code class="text-gray-300">llm_call</code> &mdash; runs on a single persistent socket connection until the session ends.
+      </p>
+
+      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Agent sends llm_call</span>
+{"jsonrpc":"2.0","id":1,"method":"llm_call","params":{"messages":[...],"tools":[...]}}
+
+<span class="text-gray-600"># Tightbeam streams response</span>
+{"jsonrpc":"2.0","method":"output","params":{"stream":"content","data":{"type":"text","text":"I'll run ls"}}}
+{"jsonrpc":"2.0","id":1,"result":{"stop_reason":"tool_use","tool_calls":[{"id":"tc-1","name":"bash","input":{"command":"ls"}}]}}
+
+<span class="text-gray-600"># Agent executes tool, sends result</span>
+{"jsonrpc":"2.0","id":2,"method":"tool_result","params":{"tool_call_id":"tc-1","result":"main.rs\nlib.rs"}}
+
+<span class="text-gray-600"># Tightbeam streams continuation</span>
+{"jsonrpc":"2.0","method":"output","params":{"stream":"content","data":{"type":"text","text":"The directory contains..."}}}
+{"jsonrpc":"2.0","id":2,"result":{"stop_reason":"end_turn","text":"The directory contains main.rs and lib.rs."}}</pre>
+    </section>
+
+    <!-- Ecosystem -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Part of the same ecosystem</h2>
+
+      <p class="text-sm text-gray-400 mb-8 leading-relaxed">
+        Tightbeam and <a href="https://calebfaruki.github.io/airlock" class="text-gray-300 underline hover:text-white transition-colors">Airlock</a> solve the same problem at different layers. Both are Rust binaries, JSON-RPC 2.0 over unix sockets, same daemon lifecycle pattern.
+      </p>
+
+      <div class="grid sm:grid-cols-2 gap-8">
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Airlock</h3>
+          <ul class="space-y-2 text-sm text-gray-500">
+            <li>CLI credential isolation</li>
+            <li>Proxies git, aws, terraform, ssh, docker</li>
+            <li>Deny rules, per-tool arg restrictions</li>
+            <li>Stateless &mdash; each command is independent</li>
+          </ul>
+        </div>
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Tightbeam</h3>
+          <ul class="space-y-2 text-sm text-gray-400">
+            <li>LLM API credential isolation</li>
+            <li>Proxies LLM calls, human messages, MCP requests</li>
+            <li>Conversation accumulation, history ownership</li>
+            <li>Conversational &mdash; persistent session, tool loops</li>
+          </ul>
+        </div>
+      </div>
+
+      <p class="text-xs text-gray-600 mt-6">
+        Use Airlock for CLI tools. Use Tightbeam for LLM APIs. Run both.
+      </p>
+    </section>
+
+    <!-- Quick start -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Quick start</h2>
+
+      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Install</span>
+curl -fsSL https://raw.githubusercontent.com/calebfaruki/tightbeam/main/install.sh | sh
+
+<span class="text-gray-600"># Create an agent profile</span>
+cat > ~/.config/tightbeam/agents/my-agent.toml &lt;&lt; 'EOF'
+[provider]
+name = "claude"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+max_tokens = 8192
+
+[socket]
+path = "my-agent.sock"
+
+[log]
+path = "my-agent/"
+EOF
+
+<span class="text-gray-600"># Run your container</span>
+docker run \
+  -v ~/.config/tightbeam/sockets/my-agent.sock:/run/docker-tightbeam.sock \
+  your-agent-image</pre>
+    </section>
+
+    <!-- Security -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Agents can be tricked into using your API key against you</h2>
+
+      <p class="text-sm text-gray-400 mb-8 leading-relaxed">
+        AI agents follow instructions from content they process. They can't reliably tell your instructions apart from malicious ones. A prompt injection in a file, a commit message, or an API response can hijack the agent and make it act with your full API key. The only way to prevent this is to never give the agent the key in the first place.
+      </p>
+
+      <div class="grid sm:grid-cols-3 gap-5 mb-8">
+        <div class="border border-white/10 px-4 py-4">
+          <div class="text-sm font-medium text-gray-300 mb-2">The agent can't leak what it doesn't have</div>
+          <p class="text-xs text-gray-500 leading-relaxed">
+            API keys live on the host, never inside the container. Even a fully compromised agent &mdash; prompt-injected, jailbroken, running malicious code &mdash; cannot access keys that don't exist in its environment. The agent can't escalate to a different model, provider, or credential set.
+          </p>
+        </div>
+        <div class="border border-white/10 px-4 py-4">
+          <div class="text-sm font-medium text-gray-300 mb-2">Each agent is isolated from every other</div>
+          <p class="text-xs text-gray-500 leading-relaxed">
+            Per-agent sockets, per-agent credentials, per-agent conversation logs. A compromised agent's session can't affect other agents. The blast radius of any single failure is one socket.
+          </p>
+        </div>
+        <div class="border border-white/10 px-4 py-4">
+          <div class="text-sm font-medium text-gray-300 mb-2">The audit trail is outside the agent's control</div>
+          <p class="text-xs text-gray-500 leading-relaxed">
+            Every message, tool call, and LLM response is written to NDJSON logs on the host. The agent can't tamper with, suppress, or erase its own history. Forensic review doesn't depend on the agent's cooperation.
+          </p>
+        </div>
+      </div>
+
+      <p class="text-xs text-gray-600 leading-relaxed">
+        Maps to <a href="https://genai.owasp.org" class="underline hover:text-white transition-colors">OWASP Agentic Top 10</a> risks ASI03 (credential isolation prevents identity and privilege abuse), ASI08 (per-agent isolation contains cascading failures), and ASI09 (host-side logs for audit and forensics). Tightbeam operates at the infrastructure layer &mdash; model-layer risks require model-layer mitigations.
+      </p>
+    </section>
+
+    <!-- Footer -->
+    <footer class="border-t border-white/10 pt-6 pb-12 flex flex-wrap items-center gap-4 text-xs text-gray-600">
+      <a href="https://github.com/calebfaruki/tightbeam" class="hover:text-white transition-colors">GitHub</a>
+      <a href="https://calebfaruki.github.io/airlock" class="hover:text-white transition-colors">Airlock</a>
+    </footer>
+
+  </div>
+
+</body>
+</html>
