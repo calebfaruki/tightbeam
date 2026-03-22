@@ -1,17 +1,15 @@
 pub mod conversation;
 pub mod init;
-pub mod lifecycle;
 pub mod profile;
 pub mod protocol;
 pub mod provider;
 pub mod streaming;
 
 use conversation::ConversationLog;
-use lifecycle::IdleMap;
 use profile::AgentProfile;
 use protocol::{
-    build_error, build_final_response, build_notification, send_line, validate_request, StreamData,
-    StopReason, ValidatedRequest,
+    build_error, build_final_response, build_notification, send_line, validate_request, StopReason,
+    StreamData, ValidatedRequest,
 };
 use provider::{collect_text, collect_tool_calls, LlmProvider, ProviderConfig, StreamEvent};
 
@@ -123,8 +121,11 @@ async fn call_provider_and_respond(
                 events.push(event);
             }
             Err(e) => {
-                write_json_line(writer, &build_error(id, -32603, format!("stream error: {e}")))
-                    .await?;
+                write_json_line(
+                    writer,
+                    &build_error(id, -32603, format!("stream error: {e}")),
+                )
+                .await?;
                 return Ok(());
             }
         }
@@ -188,7 +189,6 @@ pub async fn handle_connection(
     profiles: ProfileMap,
     conversations: ConversationMap,
     providers: ProviderMap,
-    idle_map: IdleMap,
     logs_base_dir: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (reader, mut writer) = stream.into_split();
@@ -226,8 +226,6 @@ pub async fn handle_connection(
             }
         }
 
-        lifecycle::touch(&idle_map, &profile_name).await;
-
         match validate_request(&line) {
             Ok(ValidatedRequest::Turn { id, params }) => {
                 handle_turn(
@@ -261,7 +259,6 @@ pub async fn run_daemon(
     profiles: ProfileMap,
     conversations: ConversationMap,
     providers: ProviderMap,
-    idle_map: IdleMap,
     logs_base_dir: PathBuf,
 ) {
     for (profile_name, listener) in listeners {
@@ -269,7 +266,6 @@ pub async fn run_daemon(
         let profs = profiles.clone();
         let convos = conversations.clone();
         let provs = providers.clone();
-        let idles = idle_map.clone();
         let logs_dir = logs_base_dir.clone();
 
         tokio::spawn(async move {
@@ -286,11 +282,10 @@ pub async fn run_daemon(
                 let p = profs.clone();
                 let c = convos.clone();
                 let pv = provs.clone();
-                let im = idles.clone();
                 let ld = logs_dir.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, n, p, c, pv, im, ld).await {
+                    if let Err(e) = handle_connection(stream, n, p, c, pv, ld).await {
                         tracing::error!("connection error: {e}");
                     }
                 });

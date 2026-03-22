@@ -164,8 +164,8 @@ mod conversation_accumulation {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(tmp.path());
 
-        log.append(text_msg("user","Hello")).unwrap();
-        log.append(text_msg("assistant","Hi there")).unwrap();
+        log.append(text_msg("user", "Hello")).unwrap();
+        log.append(text_msg("assistant", "Hi there")).unwrap();
 
         assert_eq!(log.history().len(), 2);
         assert_eq!(log.history()[0].role, "user");
@@ -184,9 +184,9 @@ mod conversation_accumulation {
 
         {
             let mut log = ConversationLog::new(tmp.path());
-            log.append(text_msg("user","First")).unwrap();
-            log.append(text_msg("assistant","Second")).unwrap();
-            log.append(text_msg("user","Third")).unwrap();
+            log.append(text_msg("user", "First")).unwrap();
+            log.append(text_msg("assistant", "Second")).unwrap();
+            log.append(text_msg("user", "Third")).unwrap();
         }
 
         let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();

@@ -211,9 +211,15 @@ mod agent_tests {
 
         assert_eq!(turn["method"], "turn");
         // A2: positive assertion — first turn MUST include system and tools
-        assert!(turn["params"]["system"].is_string(), "first turn must include system prompt");
+        assert!(
+            turn["params"]["system"].is_string(),
+            "first turn must include system prompt"
+        );
         assert_eq!(turn["params"]["system"], "You are a test agent.");
-        assert!(turn["params"]["tools"].is_array(), "first turn must include tools");
+        assert!(
+            turn["params"]["tools"].is_array(),
+            "first turn must include tools"
+        );
         assert!(!turn["params"]["tools"].as_array().unwrap().is_empty());
         assert_eq!(turn["params"]["messages"][0]["role"], "user");
         assert_eq!(turn["params"]["messages"][0]["content"], "Hello");
@@ -274,7 +280,10 @@ mod agent_tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "tool");
         // A1: verify tool_call_id matches exactly
-        assert_eq!(messages[0]["tool_call_id"], "tc-1", "tool_call_id must match the request");
+        assert_eq!(
+            messages[0]["tool_call_id"], "tc-1",
+            "tool_call_id must match the request"
+        );
         let content = messages[0]["content"].as_str().unwrap();
         assert!(content.contains("tool_output"));
         // A1: verify is_error absent for successful tool execution
@@ -380,7 +389,10 @@ mod agent_tests {
         let turn2 = mock.read_turn().await;
         let messages = turn2["params"]["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "user", "next turn should be a user message, not a tool result");
+        assert_eq!(
+            messages[0]["role"], "user",
+            "next turn should be a user message, not a tool result"
+        );
         assert_eq!(messages[0]["content"], "Next");
         assert!(
             messages[0].get("tool_call_id").is_none() || messages[0]["tool_call_id"].is_null(),

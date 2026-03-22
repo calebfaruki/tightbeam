@@ -319,5 +319,4 @@ mod protocol_parsing {
         assert_eq!(result.last(), Some(&b'\n'));
         assert_eq!(result.len(), line.len() + 1);
     }
-
 }

@@ -1,4 +1,3 @@
-use tightbeam_daemon::lifecycle;
 use tightbeam_daemon::profile::AgentProfile;
 use tightbeam_daemon::provider::claude::ClaudeProvider;
 use tightbeam_daemon::provider::LlmProvider;
@@ -8,7 +7,6 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
@@ -245,19 +243,6 @@ async fn main() {
     let profiles: ProfileMap = Arc::new(profile_map);
     let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
     let providers: ProviderMap = Arc::new(provider_map);
-    let idle_map = lifecycle::new_idle_map();
-
-    // Initialize idle timestamps for all agents
-    for name in &agent_names {
-        lifecycle::touch(&idle_map, name).await;
-    }
-
-    // Spawn idle checker (30 minute timeout)
-    let idle_clone = idle_map.clone();
-    tokio::spawn(lifecycle::run_idle_check(
-        idle_clone,
-        Duration::from_secs(1800),
-    ));
 
     // Rebuild conversations from existing logs
     let log_base = logs_dir();
@@ -282,13 +267,5 @@ async fn main() {
         }
     }
 
-    run_daemon(
-        listeners,
-        profiles,
-        conversations,
-        providers,
-        idle_map,
-        log_base,
-    )
-    .await;
+    run_daemon(listeners, profiles, conversations, providers, log_base).await;
 }

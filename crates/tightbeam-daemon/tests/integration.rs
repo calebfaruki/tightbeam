@@ -5,7 +5,6 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use tightbeam_daemon::lifecycle;
 use tightbeam_daemon::profile::{AgentProfile, LogConfig, ProviderConfig, SocketConfig};
 use tightbeam_daemon::protocol::{Message, ToolDefinition};
 use tightbeam_daemon::provider::{self, LlmProvider, StreamEvent};
@@ -110,21 +109,11 @@ async fn start_daemon(
     providers.insert("mock".into(), Box::new(provider));
     let providers: ProviderMap = Arc::new(providers);
 
-    let idle_map = lifecycle::new_idle_map();
-
     let listener = bind_agent_socket(sock_path).unwrap();
     let listeners = vec![("test-agent".to_string(), listener)];
 
     tokio::spawn(async move {
-        run_daemon(
-            listeners,
-            profiles,
-            conversations,
-            providers,
-            idle_map,
-            logs_dir,
-        )
-        .await;
+        run_daemon(listeners, profiles, conversations, providers, logs_dir).await;
     })
 }
 
@@ -544,9 +533,7 @@ mod protocol_integration {
         let logs = test_logs_dir("emptymsg");
 
         let provider = MockProvider::new(vec![vec![
-            StreamEvent::ContentDelta {
-                text: "OK".into(),
-            },
+            StreamEvent::ContentDelta { text: "OK".into() },
             StreamEvent::Done {
                 stop_reason: "end_turn".into(),
             },
@@ -555,8 +542,7 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        let request =
-            r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
         let final_resp = find_final_response(&lines);

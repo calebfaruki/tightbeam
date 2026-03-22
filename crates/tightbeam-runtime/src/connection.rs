@@ -65,7 +65,10 @@ impl DaemonConnection {
         Ok(id)
     }
 
-    pub(crate) async fn read_turn_response(&mut self, expected_id: u64) -> Result<TurnResponse, String> {
+    pub(crate) async fn read_turn_response(
+        &mut self,
+        expected_id: u64,
+    ) -> Result<TurnResponse, String> {
         let mut line_buf = String::new();
 
         loop {
@@ -81,8 +84,8 @@ impl DaemonConnection {
                 continue;
             }
 
-            let resp: RpcResponse = serde_json::from_str(trimmed)
-                .map_err(|e| format!("invalid response JSON: {e}"))?;
+            let resp: RpcResponse =
+                serde_json::from_str(trimmed).map_err(|e| format!("invalid response JSON: {e}"))?;
 
             // Streaming notification (no id) — skip
             if resp.method.is_some() && resp.id.is_none() {
@@ -92,7 +95,9 @@ impl DaemonConnection {
             // Final response (has id)
             if let Some(id) = resp.id {
                 if id != expected_id {
-                    return Err(format!("unexpected response id: expected {expected_id}, got {id}"));
+                    return Err(format!(
+                        "unexpected response id: expected {expected_id}, got {id}"
+                    ));
                 }
 
                 if let Some(error) = resp.error {
@@ -142,9 +147,7 @@ mod connection_tests {
     use super::*;
     use tokio::io::AsyncReadExt;
 
-    async fn mock_socket_pair(
-        name: &str,
-    ) -> (DaemonConnection, tokio::net::UnixStream) {
+    async fn mock_socket_pair(name: &str) -> (DaemonConnection, tokio::net::UnixStream) {
         let sock_dir =
             std::env::temp_dir().join(format!("tb-conn-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&sock_dir);
@@ -203,10 +206,7 @@ mod connection_tests {
         let final_resp = r#"{"jsonrpc":"2.0","id":1,"result":{"stop_reason":"end_turn","content":"RESPONSE_TEXT"}}"#;
 
         let payload = format!("{notif}\n{final_resp}\n");
-        daemon_writer
-            .write_all(payload.as_bytes())
-            .await
-            .unwrap();
+        daemon_writer.write_all(payload.as_bytes()).await.unwrap();
         daemon_writer.flush().await.unwrap();
 
         let response = conn.read_turn_response(1).await.unwrap();
@@ -261,7 +261,8 @@ mod connection_tests {
         let (mut conn, daemon) = mock_socket_pair("human").await;
         let (_, mut daemon_writer) = daemon.into_split();
 
-        let msg = r#"{"jsonrpc":"2.0","method":"human_message","params":{"content":"Fix the bug."}}"#;
+        let msg =
+            r#"{"jsonrpc":"2.0","method":"human_message","params":{"content":"Fix the bug."}}"#;
         daemon_writer
             .write_all(format!("{msg}\n").as_bytes())
             .await
@@ -301,7 +302,8 @@ mod connection_tests {
         let (mut conn, daemon) = mock_socket_pair("idmis").await;
         let (_, mut daemon_writer) = daemon.into_split();
 
-        let resp = r#"{"jsonrpc":"2.0","id":99,"result":{"stop_reason":"end_turn","content":"wrong id"}}"#;
+        let resp =
+            r#"{"jsonrpc":"2.0","id":99,"result":{"stop_reason":"end_turn","content":"wrong id"}}"#;
         daemon_writer
             .write_all(format!("{resp}\n").as_bytes())
             .await
@@ -321,13 +323,11 @@ mod connection_tests {
 
         // Send an "output" notification first, then a human_message
         let output_notif = r#"{"jsonrpc":"2.0","method":"output","params":{"stream":"content","data":{"type":"text","text":"noise"}}}"#;
-        let human_msg = r#"{"jsonrpc":"2.0","method":"human_message","params":{"content":"Real message"}}"#;
+        let human_msg =
+            r#"{"jsonrpc":"2.0","method":"human_message","params":{"content":"Real message"}}"#;
 
         let payload = format!("{output_notif}\n{human_msg}\n");
-        daemon_writer
-            .write_all(payload.as_bytes())
-            .await
-            .unwrap();
+        daemon_writer.write_all(payload.as_bytes()).await.unwrap();
         daemon_writer.flush().await.unwrap();
 
         let human = conn.wait_for_human_message().await.unwrap();

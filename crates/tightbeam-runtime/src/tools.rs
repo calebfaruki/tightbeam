@@ -241,7 +241,10 @@ mod tool_tests {
         let marker_pos = result.find("[...truncated").unwrap();
         let head_len = marker_pos;
         // Head should be roughly 40% of available space (not 50% or 10%)
-        assert!((15..=40).contains(&head_len), "head should be ~40% of available, got {head_len}");
+        assert!(
+            (15..=40).contains(&head_len),
+            "head should be ~40% of available, got {head_len}"
+        );
     }
 
     #[test]
@@ -374,7 +377,11 @@ mod tool_tests {
         let input = serde_json::json!({"command": "yes | head -n 10000"});
         let (output, is_error) = execute_tool("bash", &input, 200).await;
         assert!(!is_error);
-        assert_eq!(output.len(), 200, "truncation should produce exactly max_chars output");
+        assert_eq!(
+            output.len(),
+            200,
+            "truncation should produce exactly max_chars output"
+        );
         assert!(output.contains("[...truncated"));
     }
 
@@ -382,13 +389,19 @@ mod tool_tests {
     async fn execute_tool_propagates_error_flag_on_failure() {
         let input = serde_json::json!({"command": "exit 1"});
         let (_, is_error) = execute_tool("bash", &input, 30000).await;
-        assert!(is_error, "non-zero exit should propagate is_error=true through execute_tool");
+        assert!(
+            is_error,
+            "non-zero exit should propagate is_error=true through execute_tool"
+        );
     }
 
     #[tokio::test]
     async fn execute_tool_propagates_success_flag() {
         let input = serde_json::json!({"command": "echo ok"});
         let (_, is_error) = execute_tool("bash", &input, 30000).await;
-        assert!(!is_error, "zero exit should propagate is_error=false through execute_tool");
+        assert!(
+            !is_error,
+            "zero exit should propagate is_error=false through execute_tool"
+        );
     }
 }

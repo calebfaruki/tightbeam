@@ -21,8 +21,9 @@ impl RuntimeConfig {
             match args[i].as_str() {
                 "--system-prompt" => {
                     i += 1;
-                    system_prompt_path =
-                        Some(PathBuf::from(args.get(i).ok_or("--system-prompt requires a value")?));
+                    system_prompt_path = Some(PathBuf::from(
+                        args.get(i).ok_or("--system-prompt requires a value")?,
+                    ));
                 }
                 "--tools" => {
                     i += 1;
@@ -36,8 +37,9 @@ impl RuntimeConfig {
                 }
                 "--socket" => {
                     i += 1;
-                    socket_path =
-                        Some(PathBuf::from(args.get(i).ok_or("--socket requires a value")?));
+                    socket_path = Some(PathBuf::from(
+                        args.get(i).ok_or("--socket requires a value")?,
+                    ));
                 }
                 "--max-iterations" => {
                     i += 1;
@@ -59,8 +61,7 @@ impl RuntimeConfig {
         }
 
         Ok(Self {
-            system_prompt_path: system_prompt_path
-                .ok_or("--system-prompt is required")?,
+            system_prompt_path: system_prompt_path.ok_or("--system-prompt is required")?,
             tools: tools.ok_or("--tools is required")?,
             socket_path: socket_path.ok_or("--socket is required")?,
             max_iterations,
