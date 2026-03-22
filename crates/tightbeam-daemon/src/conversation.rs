@@ -22,7 +22,8 @@ struct LogEntry {
 pub struct ConversationLog {
     messages: Vec<Message>,
     system_prompt: Option<String>,
-    tools: Vec<ToolDefinition>,
+    local_tools: Vec<ToolDefinition>,
+    mcp_tools: Vec<ToolDefinition>,
     log_path: PathBuf,
 }
 
@@ -32,7 +33,8 @@ impl ConversationLog {
         Self {
             messages: Vec::new(),
             system_prompt: None,
-            tools: Vec::new(),
+            local_tools: Vec::new(),
+            mcp_tools: Vec::new(),
             log_path,
         }
     }
@@ -65,7 +67,8 @@ impl ConversationLog {
         Ok(Self {
             messages,
             system_prompt: None,
-            tools: Vec::new(),
+            local_tools: Vec::new(),
+            mcp_tools: Vec::new(),
             log_path,
         })
     }
@@ -81,11 +84,17 @@ impl ConversationLog {
     }
 
     pub fn set_tools(&mut self, tools: Vec<ToolDefinition>) {
-        self.tools = tools;
+        self.local_tools = tools;
     }
 
-    pub fn tools(&self) -> &[ToolDefinition] {
-        &self.tools
+    pub fn set_mcp_tools(&mut self, tools: Vec<ToolDefinition>) {
+        self.mcp_tools = tools;
+    }
+
+    pub fn tools(&self) -> Vec<ToolDefinition> {
+        let mut all = self.local_tools.clone();
+        all.extend(self.mcp_tools.iter().cloned());
+        all
     }
 
     pub fn append(&mut self, message: Message) -> Result<(), String> {

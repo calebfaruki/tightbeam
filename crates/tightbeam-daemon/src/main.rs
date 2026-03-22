@@ -1,7 +1,9 @@
-use tightbeam_daemon::profile::AgentProfile;
+use tightbeam_daemon::profile::{AgentProfile, Registry};
 use tightbeam_daemon::provider::claude::ClaudeProvider;
 use tightbeam_daemon::provider::LlmProvider;
-use tightbeam_daemon::{bind_agent_socket, run_daemon, ConversationMap, ProfileMap, ProviderMap};
+use tightbeam_daemon::{
+    bind_agent_socket, run_daemon, ConversationMap, McpManagerMap, ProfileMap, ProviderMap,
+};
 
 use std::collections::HashMap;
 use std::env;
@@ -161,6 +163,16 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
+    let registry_path = config_dir().join("registry.toml");
+    let registry = if registry_path.exists() {
+        Registry::load(&registry_path).unwrap_or_else(|e| {
+            eprintln!("tightbeam: {e}");
+            std::process::exit(1);
+        })
+    } else {
+        Registry::empty()
+    };
+
     let agent_dir = agents_dir();
     let mut profile_map: HashMap<String, AgentProfile> = HashMap::new();
 
@@ -175,7 +187,7 @@ async fn main() {
                     Some(n) => n.to_string(),
                     None => continue,
                 };
-                match AgentProfile::load(&path) {
+                match AgentProfile::load(&path, &registry) {
                     Ok(profile) => {
                         profile_map.insert(name, profile);
                     }
@@ -238,11 +250,12 @@ async fn main() {
 
     // Initialize providers
     let mut provider_map: HashMap<String, Box<dyn LlmProvider>> = HashMap::new();
-    provider_map.insert("claude".into(), Box::new(ClaudeProvider::new()));
+    provider_map.insert("anthropic".into(), Box::new(ClaudeProvider::new()));
 
     let profiles: ProfileMap = Arc::new(profile_map);
     let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
     let providers: ProviderMap = Arc::new(provider_map);
+    let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
 
     // Rebuild conversations from existing logs
     let log_base = logs_dir();
@@ -267,5 +280,5 @@ async fn main() {
         }
     }
 
-    run_daemon(listeners, profiles, conversations, providers, log_base).await;
+    run_daemon(listeners, profiles, conversations, providers, mcp_managers, log_base).await;
 }
