@@ -158,4 +158,26 @@ mod provider_helpers {
         assert_eq!(calls[0].name, "bash");
         assert_eq!(calls[1].name, "read");
     }
+
+    #[test]
+    fn collect_tool_calls_keeps_raw_string_on_invalid_json() {
+        let events = vec![
+            StreamEvent::ToolUseStart {
+                id: "tc-1".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseInput {
+                json: "not valid json{".into(),
+            },
+            StreamEvent::Done {
+                stop_reason: "tool_use".into(),
+            },
+        ];
+        let calls = collect_tool_calls(&events);
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].input.is_string(),
+            "input should stay as raw string when JSON parsing fails"
+        );
+    }
 }

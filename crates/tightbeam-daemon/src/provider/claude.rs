@@ -94,7 +94,7 @@ fn build_api_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "name": t.name,
                 "description": t.description,
-                "input_schema": t.input_schema,
+                "input_schema": t.parameters,
             })
         })
         .collect()
@@ -168,6 +168,7 @@ mod claude_api {
             content: Some(serde_json::Value::String("Hello".into())),
             tool_calls: None,
             tool_call_id: None,
+            is_error: None,
         }];
         let api = build_api_messages(&messages);
         assert_eq!(api.len(), 1);
@@ -186,6 +187,7 @@ mod claude_api {
                 input: serde_json::json!({"command": "ls"}),
             }]),
             tool_call_id: None,
+            is_error: None,
         }];
         let api = build_api_messages(&messages);
         let content = api[0]["content"].as_array().unwrap();
@@ -201,6 +203,7 @@ mod claude_api {
             content: Some(serde_json::Value::String("file list here".into())),
             tool_calls: None,
             tool_call_id: Some("tc-1".into()),
+            is_error: None,
         }];
         let api = build_api_messages(&messages);
         assert_eq!(api[0]["role"], "user");
@@ -215,7 +218,7 @@ mod claude_api {
         let tools = vec![ToolDefinition {
             name: "bash".into(),
             description: "Run a shell command".into(),
-            input_schema: serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
+            parameters: serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
         }];
         let api = build_api_tools(&tools);
         assert_eq!(api.len(), 1);

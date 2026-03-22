@@ -1304,6 +1304,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tightbeam-protocol",
  "tokio",
  "toml",
  "tracing",
@@ -1311,11 +1312,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "tightbeam-shim"
+name = "tightbeam-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tightbeam-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tightbeam-protocol",
+ "tokio",
 ]
 
 [[package]]

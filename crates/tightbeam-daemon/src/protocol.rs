@@ -1,30 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-// --- Shared types ---
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: String,
-    pub content: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub input: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-}
+pub use tightbeam_protocol::{
+    Message, StopReason, StreamData, ToolCall, ToolDefinition, TurnRequest, TurnResponse,
+};
 
 // --- Inbound requests (container → tightbeam) ---
 
@@ -34,20 +12,6 @@ pub struct RpcRequest {
     pub id: Option<u64>,
     pub method: String,
     pub params: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LlmCallParams {
-    pub messages: Vec<Message>,
-    #[serde(default)]
-    pub tools: Vec<ToolDefinition>,
-    pub system: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ToolResultParams {
-    pub tool_call_id: String,
-    pub result: String,
 }
 
 // --- Outbound responses (tightbeam → container) ---
@@ -65,20 +29,6 @@ pub struct StreamParams {
     pub data: StreamData,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct StreamData {
-    #[serde(rename = "type")]
-    pub data_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<serde_json::Value>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct FinalResponse {
     pub jsonrpc: &'static str,
@@ -88,11 +38,11 @@ pub struct FinalResponse {
 
 #[derive(Debug, Serialize)]
 pub struct FinalResult {
-    pub stop_reason: String,
+    pub stop_reason: StopReason,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,8 +61,7 @@ pub struct RpcError {
 // --- Validation ---
 
 pub enum ValidatedRequest {
-    LlmCall { id: u64, params: LlmCallParams },
-    ToolResult { id: u64, params: ToolResultParams },
+    Turn { id: u64, params: TurnRequest },
 }
 
 pub fn validate_request(raw: &str) -> Result<ValidatedRequest, ErrorResponse> {
@@ -136,15 +85,10 @@ pub fn validate_request(raw: &str) -> Result<ValidatedRequest, ErrorResponse> {
         .ok_or_else(|| build_error(id, -32600, "missing params".into()))?;
 
     match request.method.as_str() {
-        "llm_call" => {
-            let params: LlmCallParams = serde_json::from_value(params_value)
-                .map_err(|e| build_error(id, -32602, format!("invalid llm_call params: {e}")))?;
-            Ok(ValidatedRequest::LlmCall { id, params })
-        }
-        "tool_result" => {
-            let params: ToolResultParams = serde_json::from_value(params_value)
-                .map_err(|e| build_error(id, -32602, format!("invalid tool_result params: {e}")))?;
-            Ok(ValidatedRequest::ToolResult { id, params })
+        "turn" => {
+            let params: TurnRequest = serde_json::from_value(params_value)
+                .map_err(|e| build_error(id, -32602, format!("invalid turn params: {e}")))?;
+            Ok(ValidatedRequest::Turn { id, params })
         }
         "send_message" | "mcp_call" => Err(build_error(
             id,
@@ -182,9 +126,9 @@ pub fn build_notification(stream: &str, data: StreamData) -> StreamNotification 
 
 pub fn build_final_response(
     id: u64,
-    stop_reason: String,
+    stop_reason: StopReason,
     tool_calls: Option<Vec<ToolCall>>,
-    text: Option<String>,
+    content: Option<String>,
 ) -> FinalResponse {
     FinalResponse {
         jsonrpc: "2.0",
@@ -192,7 +136,7 @@ pub fn build_final_response(
         result: FinalResult {
             stop_reason,
             tool_calls,
-            text,
+            content,
         },
     }
 }
@@ -208,29 +152,43 @@ mod protocol_parsing {
     use super::*;
 
     #[test]
-    fn valid_llm_call_parses() {
-        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"llm_call","params":{"messages":[{"role":"user","content":"Hello"}],"tools":[]}}"#;
-        match validate_request(raw) {
-            Ok(ValidatedRequest::LlmCall { id, params }) => {
-                assert_eq!(id, 1);
-                assert_eq!(params.messages.len(), 1);
-                assert_eq!(params.messages[0].role, "user");
-            }
-            _ => panic!("expected LlmCall"),
-        }
+    fn valid_turn_parses() {
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hello"}]}}"#;
+        let Ok(ValidatedRequest::Turn { id, params }) = validate_request(raw) else {
+            panic!("expected Turn");
+        };
+        assert_eq!(id, 1);
+        assert_eq!(params.messages.len(), 1);
+        assert_eq!(params.messages[0].role, "user");
+        assert!(params.system.is_none());
+        assert!(params.tools.is_none());
     }
 
     #[test]
-    fn valid_tool_result_parses() {
-        let raw = r#"{"jsonrpc":"2.0","id":2,"method":"tool_result","params":{"tool_call_id":"tc-001","result":"output here"}}"#;
-        match validate_request(raw) {
-            Ok(ValidatedRequest::ToolResult { id, params }) => {
-                assert_eq!(id, 2);
-                assert_eq!(params.tool_call_id, "tc-001");
-                assert_eq!(params.result, "output here");
-            }
-            _ => panic!("expected ToolResult"),
-        }
+    fn turn_with_system_and_tools_parses() {
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","tools":[{"name":"bash","description":"Run a command","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Hi"}]}}"#;
+        let Ok(ValidatedRequest::Turn { id, params }) = validate_request(raw) else {
+            panic!("expected Turn");
+        };
+        assert_eq!(id, 1);
+        assert_eq!(params.system.as_deref(), Some("You are helpful"));
+        assert_eq!(params.tools.as_ref().unwrap().len(), 1);
+        assert_eq!(params.tools.as_ref().unwrap()[0].name, "bash");
+    }
+
+    #[test]
+    fn turn_with_tool_results_parses() {
+        let raw = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-001","content":"output here"}]}}"#;
+        let Ok(ValidatedRequest::Turn { id, params }) = validate_request(raw) else {
+            panic!("expected Turn");
+        };
+        assert_eq!(id, 2);
+        assert_eq!(params.messages[0].role, "tool");
+        assert_eq!(params.messages[0].tool_call_id.as_deref(), Some("tc-001"));
+        assert_eq!(
+            params.messages[0].content.as_ref().and_then(|v| v.as_str()),
+            Some("output here")
+        );
     }
 
     #[test]
@@ -276,7 +234,7 @@ mod protocol_parsing {
 
     #[test]
     fn wrong_jsonrpc_version_returns_error() {
-        let raw = r#"{"jsonrpc":"1.0","id":1,"method":"llm_call","params":{"messages":[]}}"#;
+        let raw = r#"{"jsonrpc":"1.0","id":1,"method":"turn","params":{"messages":[]}}"#;
         match validate_request(raw) {
             Err(e) => assert_eq!(e.error.code, -32600),
             _ => panic!("expected invalid version error"),
@@ -285,7 +243,7 @@ mod protocol_parsing {
 
     #[test]
     fn missing_params_returns_error() {
-        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"llm_call"}"#;
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"turn"}"#;
         match validate_request(raw) {
             Err(e) => {
                 assert_eq!(e.error.code, -32600);
@@ -316,8 +274,12 @@ mod protocol_parsing {
 
     #[test]
     fn final_response_serializes_correctly() {
-        let resp =
-            build_final_response(1, "end_turn".into(), None, Some("The answer is 42.".into()));
+        let resp = build_final_response(
+            1,
+            StopReason::EndTurn,
+            None,
+            Some("The answer is 42.".into()),
+        );
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"id\":1"));
         assert!(json.contains("\"stop_reason\":\"end_turn\""));
@@ -328,7 +290,7 @@ mod protocol_parsing {
     fn final_response_with_tool_calls() {
         let resp = build_final_response(
             1,
-            "tool_use".into(),
+            StopReason::ToolUse,
             Some(vec![ToolCall {
                 id: "tc-001".into(),
                 name: "bash".into(),
@@ -357,4 +319,5 @@ mod protocol_parsing {
         assert_eq!(result.last(), Some(&b'\n'));
         assert_eq!(result.len(), line.len() + 1);
     }
+
 }

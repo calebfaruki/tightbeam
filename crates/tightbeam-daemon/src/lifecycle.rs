@@ -39,22 +39,6 @@ pub async fn stop_agent(agent: &str) -> Result<(), String> {
     }
 }
 
-pub async fn start_agent(agent: &str) -> Result<(), String> {
-    let service_name = format!("medina-agent-{agent}.service");
-    let status = tokio::process::Command::new("systemctl")
-        .args(["--user", "start", &service_name])
-        .status()
-        .await
-        .map_err(|e| format!("failed to run systemctl start: {e}"))?;
-
-    if status.success() {
-        tracing::info!("started agent {agent}");
-        Ok(())
-    } else {
-        Err(format!("systemctl start {service_name} failed"))
-    }
-}
-
 pub async fn run_idle_check(idle_map: IdleMap, timeout: Duration) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {

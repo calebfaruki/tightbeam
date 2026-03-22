@@ -15,6 +15,8 @@ struct LogEntry {
     tool_calls: Option<Vec<crate::protocol::ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_error: Option<bool>,
 }
 
 pub struct ConversationLog {
@@ -55,6 +57,7 @@ impl ConversationLog {
                     content: entry.content,
                     tool_calls: entry.tool_calls,
                     tool_call_id: entry.tool_call_id,
+                    is_error: entry.is_error,
                 });
             }
         }
@@ -113,6 +116,7 @@ impl ConversationLog {
             content: message.content.clone(),
             tool_calls: message.tool_calls.clone(),
             tool_call_id: message.tool_call_id.clone(),
+            is_error: message.is_error,
         };
 
         let mut line = serde_json::to_string(&entry)
@@ -137,21 +141,13 @@ mod conversation_accumulation {
     use super::*;
     use tempfile::TempDir;
 
-    fn user_msg(text: &str) -> Message {
+    fn text_msg(role: &str, text: &str) -> Message {
         Message {
-            role: "user".into(),
+            role: role.into(),
             content: Some(serde_json::Value::String(text.into())),
             tool_calls: None,
             tool_call_id: None,
-        }
-    }
-
-    fn assistant_msg(text: &str) -> Message {
-        Message {
-            role: "assistant".into(),
-            content: Some(serde_json::Value::String(text.into())),
-            tool_calls: None,
-            tool_call_id: None,
+            is_error: None,
         }
     }
 
@@ -168,8 +164,8 @@ mod conversation_accumulation {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(tmp.path());
 
-        log.append(user_msg("Hello")).unwrap();
-        log.append(assistant_msg("Hi there")).unwrap();
+        log.append(text_msg("user","Hello")).unwrap();
+        log.append(text_msg("assistant","Hi there")).unwrap();
 
         assert_eq!(log.history().len(), 2);
         assert_eq!(log.history()[0].role, "user");
@@ -188,9 +184,9 @@ mod conversation_accumulation {
 
         {
             let mut log = ConversationLog::new(tmp.path());
-            log.append(user_msg("First")).unwrap();
-            log.append(assistant_msg("Second")).unwrap();
-            log.append(user_msg("Third")).unwrap();
+            log.append(text_msg("user","First")).unwrap();
+            log.append(text_msg("assistant","Second")).unwrap();
+            log.append(text_msg("user","Third")).unwrap();
         }
 
         let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
@@ -229,6 +225,7 @@ mod conversation_accumulation {
             content: Some(serde_json::Value::String("ls output".into())),
             tool_calls: None,
             tool_call_id: Some("tc-001".into()),
+            is_error: None,
         };
         log.append(msg).unwrap();
 
@@ -248,7 +245,7 @@ mod conversation_accumulation {
         let tools = vec![ToolDefinition {
             name: "bash".into(),
             description: "Run a command".into(),
-            input_schema: serde_json::json!({"type": "object"}),
+            parameters: serde_json::json!({"type": "object"}),
         }];
         log.set_tools(tools);
         assert_eq!(log.tools().len(), 1);
@@ -259,12 +256,12 @@ mod conversation_accumulation {
             ToolDefinition {
                 name: "bash".into(),
                 description: "Run a command".into(),
-                input_schema: serde_json::json!({"type": "object"}),
+                parameters: serde_json::json!({"type": "object"}),
             },
             ToolDefinition {
                 name: "read".into(),
                 description: "Read a file".into(),
-                input_schema: serde_json::json!({"type": "object"}),
+                parameters: serde_json::json!({"type": "object"}),
             },
         ];
         log.set_tools(new_tools);
@@ -285,6 +282,7 @@ mod conversation_accumulation {
                 input: serde_json::json!({"command": "ls"}),
             }]),
             tool_call_id: None,
+            is_error: None,
         };
         log.append(msg).unwrap();
 
@@ -292,5 +290,20 @@ mod conversation_accumulation {
         let tool_calls = rebuilt.history()[0].tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "bash");
+    }
+
+    #[test]
+    fn rebuild_fails_on_corrupted_log() {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("conversation.ndjson");
+        std::fs::write(
+            &log_path,
+            "{\"ts\":\"t\",\"role\":\"user\",\"content\":\"ok\"}\nnot json\n",
+        )
+        .unwrap();
+        assert!(
+            ConversationLog::rebuild(tmp.path()).is_err(),
+            "should fail on corrupted log entry"
+        );
     }
 }

@@ -17,8 +17,6 @@ use tokio::sync::RwLock;
 // --- MockProvider ---
 
 struct CapturedCall {
-    #[allow(dead_code)]
-    messages: Vec<Message>,
     system: Option<String>,
     tools: Vec<ToolDefinition>,
 }
@@ -45,14 +43,13 @@ impl MockProvider {
 impl LlmProvider for MockProvider {
     async fn call(
         &self,
-        messages: &[Message],
+        _messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
         _config: &provider::ProviderConfig,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, String>> + Send>>, String>
     {
         self.call_log.lock().unwrap().push(CapturedCall {
-            messages: messages.to_vec(),
             system: system.map(|s| s.to_string()),
             tools: tools.to_vec(),
         });
@@ -232,7 +229,7 @@ mod protocol_integration {
     use super::*;
 
     #[tokio::test]
-    async fn llm_call_returns_streaming_notifications_and_final_response() {
+    async fn turn_returns_streaming_notifications_and_final_response() {
         let sock = test_socket_path("stream");
         let logs = test_logs_dir("stream");
 
@@ -251,7 +248,7 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"llm_call","params":{"messages":[{"role":"user","content":"Hi"}],"tools":[]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hi"}]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
         let notif_count = count_notifications(&lines);
@@ -264,7 +261,7 @@ mod protocol_integration {
         assert_eq!(final_resp.id, Some(1));
         let result = final_resp.result.unwrap();
         assert_eq!(result["stop_reason"], "end_turn");
-        assert_eq!(result["text"], "Hello world");
+        assert_eq!(result["content"], "Hello world");
         assert!(result.get("tool_calls").is_none());
 
         let _ = std::fs::remove_dir_all(&logs);
@@ -272,7 +269,7 @@ mod protocol_integration {
     }
 
     #[tokio::test]
-    async fn llm_call_with_tool_use_returns_tool_calls() {
+    async fn turn_with_tool_use_returns_tool_calls() {
         let sock = test_socket_path("tooluse");
         let logs = test_logs_dir("tooluse");
 
@@ -292,7 +289,7 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"llm_call","params":{"messages":[{"role":"user","content":"List files"}],"tools":[]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"List files"}]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
         let final_resp = find_final_response(&lines);
@@ -304,7 +301,7 @@ mod protocol_integration {
         assert_eq!(tool_calls[0]["id"], "tc-1");
         assert_eq!(tool_calls[0]["name"], "bash");
         assert_eq!(tool_calls[0]["input"]["command"], "ls");
-        assert!(result.get("text").is_none());
+        assert!(result.get("content").is_none());
 
         let _ = std::fs::remove_dir_all(&logs);
         let _ = std::fs::remove_file(&sock);
@@ -316,7 +313,7 @@ mod protocol_integration {
         let logs = test_logs_dir("toolcont");
 
         let provider = MockProvider::new(vec![
-            // Response to llm_call
+            // Response to first turn
             vec![
                 StreamEvent::ToolUseStart {
                     id: "tc-1".into(),
@@ -329,7 +326,7 @@ mod protocol_integration {
                     stop_reason: "tool_use".into(),
                 },
             ],
-            // Response to tool_result continuation
+            // Response to tool result turn
             vec![
                 StreamEvent::ContentDelta {
                     text: "Files: main.rs".into(),
@@ -350,19 +347,19 @@ mod protocol_integration {
         let mut writer = write_half;
         let mut reader = BufReader::new(read_half);
 
-        // Step 1: llm_call with tools defined
-        let request1 = r#"{"jsonrpc":"2.0","id":1,"method":"llm_call","params":{"messages":[{"role":"user","content":"List files"}],"tools":[{"name":"bash","description":"Run a command","input_schema":{"type":"object"}}]}}"#;
+        // Step 1: turn with system, tools, and user message
+        let request1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","tools":[{"name":"bash","description":"Run a command","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"List files"}]}}"#;
         let lines1 = send_and_read_response(&mut writer, &mut reader, request1).await;
         let resp1 = find_final_response(&lines1);
         assert_eq!(resp1.result.as_ref().unwrap()["stop_reason"], "tool_use");
 
-        // Step 2: tool_result on same connection
-        let request2 = r#"{"jsonrpc":"2.0","id":2,"method":"tool_result","params":{"tool_call_id":"tc-1","result":"main.rs\nlib.rs\n"}}"#;
+        // Step 2: turn with tool results on same connection
+        let request2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-1","content":"main.rs\nlib.rs\n"}]}}"#;
         let lines2 = send_and_read_response(&mut writer, &mut reader, request2).await;
         let resp2 = find_final_response(&lines2);
         let result2 = resp2.result.unwrap();
         assert_eq!(result2["stop_reason"], "end_turn");
-        assert_eq!(result2["text"], "Files: main.rs");
+        assert_eq!(result2["content"], "Files: main.rs");
 
         // Verify tools were cached and passed to the second provider call
         let log = call_log.lock().unwrap();
@@ -394,7 +391,7 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"llm_call","params":{"messages":[{"role":"user","content":"Hello"}],"tools":[]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hello"}]}}"#;
         let lines = send_and_collect(&sock, request).await;
         let _ = find_final_response(&lines); // ensure success
 
@@ -483,7 +480,7 @@ mod protocol_integration {
     }
 
     #[tokio::test]
-    async fn system_prompt_cached_on_first_call() {
+    async fn system_prompt_cached_on_first_turn() {
         let sock = test_socket_path("sysprompt");
         let logs = test_logs_dir("sysprompt");
 
@@ -516,12 +513,12 @@ mod protocol_integration {
         let mut writer = write_half;
         let mut reader = BufReader::new(read_half);
 
-        // First call with system prompt
-        let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"llm_call","params":{"messages":[{"role":"user","content":"Hi"}],"tools":[],"system":"You are helpful"}}"#;
+        // First turn with system prompt
+        let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","messages":[{"role":"user","content":"Hi"}]}}"#;
         let _ = send_and_read_response(&mut writer, &mut reader, req1).await;
 
-        // Second call with different system prompt (should be ignored)
-        let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"llm_call","params":{"messages":[{"role":"user","content":"Hello again"}],"tools":[],"system":"Ignored"}}"#;
+        // Second turn with different system prompt (should be ignored)
+        let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"system":"Ignored","messages":[{"role":"user","content":"Hello again"}]}}"#;
         let _ = send_and_read_response(&mut writer, &mut reader, req2).await;
 
         let log = call_log.lock().unwrap();
@@ -536,6 +533,36 @@ mod protocol_integration {
             Some("You are helpful"),
             "second call should still have the first system prompt, not 'Ignored'"
         );
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn turn_with_empty_messages_succeeds() {
+        let sock = test_socket_path("emptymsg");
+        let logs = test_logs_dir("emptymsg");
+
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::ContentDelta {
+                text: "OK".into(),
+            },
+            StreamEvent::Done {
+                stop_reason: "end_turn".into(),
+            },
+        ]]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let request =
+            r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let final_resp = find_final_response(&lines);
+        assert_eq!(final_resp.id, Some(1));
+        let result = final_resp.result.unwrap();
+        assert_eq!(result["stop_reason"], "end_turn");
 
         let _ = std::fs::remove_dir_all(&logs);
         let _ = std::fs::remove_file(&sock);

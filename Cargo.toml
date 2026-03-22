@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tightbeam-shim", "crates/tightbeam-daemon"]
+members = ["crates/tightbeam-daemon", "crates/tightbeam-protocol", "crates/tightbeam-runtime"]
 resolver = "2"
 
 [workspace.lints.rust]

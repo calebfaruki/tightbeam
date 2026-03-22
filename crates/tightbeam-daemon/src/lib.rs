@@ -11,7 +11,7 @@ use lifecycle::IdleMap;
 use profile::AgentProfile;
 use protocol::{
     build_error, build_final_response, build_notification, send_line, validate_request, StreamData,
-    ValidatedRequest,
+    StopReason, ValidatedRequest,
 };
 use provider::{collect_text, collect_tool_calls, LlmProvider, ProviderConfig, StreamEvent};
 
@@ -28,6 +28,32 @@ pub type ProfileMap = Arc<HashMap<String, AgentProfile>>;
 pub type ConversationMap = Arc<RwLock<HashMap<String, ConversationLog>>>;
 pub type ProviderMap = Arc<HashMap<String, Box<dyn LlmProvider>>>;
 
+async fn write_json_line(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    value: &impl serde::Serialize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writer
+        .write_all(&send_line(&serde_json::to_string(value)?))
+        .await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+fn none_if_empty<T>(v: Vec<T>) -> Option<Vec<T>> {
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+async fn send_notification(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    data: StreamData,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_json_line(writer, &build_notification("content", data)).await
+}
+
 async fn call_provider_and_respond(
     id: u64,
     writer: &mut (impl AsyncWriteExt + Unpin),
@@ -42,10 +68,7 @@ async fn call_provider_and_respond(
     let mut stream = match provider.call(history, system, tools, config).await {
         Ok(s) => s,
         Err(e) => {
-            let err = build_error(id, -32603, e);
-            writer
-                .write_all(&send_line(&serde_json::to_string(&err)?))
-                .await?;
+            write_json_line(writer, &build_error(id, -32603, e)).await?;
             return Ok(());
         }
     };
@@ -57,8 +80,8 @@ async fn call_provider_and_respond(
             Ok(event) => {
                 match &event {
                     StreamEvent::ContentDelta { text } => {
-                        let notif = build_notification(
-                            "content",
+                        send_notification(
+                            writer,
                             StreamData {
                                 data_type: "text".into(),
                                 text: Some(text.clone()),
@@ -66,15 +89,12 @@ async fn call_provider_and_respond(
                                 name: None,
                                 input: None,
                             },
-                        );
-                        writer
-                            .write_all(&send_line(&serde_json::to_string(&notif)?))
-                            .await?;
-                        writer.flush().await?;
+                        )
+                        .await?;
                     }
                     StreamEvent::ToolUseStart { id: tc_id, name } => {
-                        let notif = build_notification(
-                            "content",
+                        send_notification(
+                            writer,
                             StreamData {
                                 data_type: "tool_use_start".into(),
                                 text: None,
@@ -82,15 +102,12 @@ async fn call_provider_and_respond(
                                 name: Some(name.clone()),
                                 input: None,
                             },
-                        );
-                        writer
-                            .write_all(&send_line(&serde_json::to_string(&notif)?))
-                            .await?;
-                        writer.flush().await?;
+                        )
+                        .await?;
                     }
                     StreamEvent::ToolUseInput { json } => {
-                        let notif = build_notification(
-                            "content",
+                        send_notification(
+                            writer,
                             StreamData {
                                 data_type: "tool_use_input".into(),
                                 text: Some(json.clone()),
@@ -98,27 +115,22 @@ async fn call_provider_and_respond(
                                 name: None,
                                 input: None,
                             },
-                        );
-                        writer
-                            .write_all(&send_line(&serde_json::to_string(&notif)?))
-                            .await?;
-                        writer.flush().await?;
+                        )
+                        .await?;
                     }
                     StreamEvent::Done { .. } => {}
                 }
                 events.push(event);
             }
             Err(e) => {
-                let err = build_error(id, -32603, format!("stream error: {e}"));
-                writer
-                    .write_all(&send_line(&serde_json::to_string(&err)?))
+                write_json_line(writer, &build_error(id, -32603, format!("stream error: {e}")))
                     .await?;
                 return Ok(());
             }
         }
     }
 
-    let stop_reason = events
+    let stop_reason_str = events
         .iter()
         .find_map(|e| match e {
             StreamEvent::Done { stop_reason } => Some(stop_reason.clone()),
@@ -126,39 +138,34 @@ async fn call_provider_and_respond(
         })
         .unwrap_or_else(|| "end_turn".into());
 
+    let stop_reason = StopReason::from_str_lossy(&stop_reason_str);
+
     let tool_calls = collect_tool_calls(&events);
-    let text = collect_text(&events);
+    let content = collect_text(&events);
 
-    let tc_opt = if tool_calls.is_empty() {
-        None
-    } else {
-        Some(tool_calls.clone())
-    };
-
-    let resp = build_final_response(id, stop_reason, tc_opt, text.clone());
-    writer
-        .write_all(&send_line(&serde_json::to_string(&resp)?))
-        .await?;
-    writer.flush().await?;
+    let resp = build_final_response(
+        id,
+        stop_reason,
+        none_if_empty(tool_calls.clone()),
+        content.clone(),
+    );
+    write_json_line(writer, &resp).await?;
 
     let assistant_msg = protocol::Message {
         role: "assistant".into(),
-        content: text.map(serde_json::Value::String),
-        tool_calls: if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls)
-        },
+        content: content.map(serde_json::Value::String),
+        tool_calls: none_if_empty(tool_calls),
         tool_call_id: None,
+        is_error: None,
     };
     conversation.append(assistant_msg)?;
 
     Ok(())
 }
 
-async fn handle_llm_call(
+async fn handle_turn(
     id: u64,
-    params: protocol::LlmCallParams,
+    params: protocol::TurnRequest,
     writer: &mut (impl AsyncWriteExt + Unpin),
     conversation: &mut ConversationLog,
     provider: &dyn LlmProvider,
@@ -167,27 +174,10 @@ async fn handle_llm_call(
     if let Some(system) = params.system {
         conversation.set_system_prompt(system);
     }
+    if let Some(tools) = params.tools {
+        conversation.set_tools(tools);
+    }
     conversation.append_many(params.messages)?;
-    conversation.set_tools(params.tools);
-
-    call_provider_and_respond(id, writer, conversation, provider, config).await
-}
-
-async fn handle_tool_result(
-    id: u64,
-    params: protocol::ToolResultParams,
-    writer: &mut (impl AsyncWriteExt + Unpin),
-    conversation: &mut ConversationLog,
-    provider: &dyn LlmProvider,
-    config: &ProviderConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let tool_msg = protocol::Message {
-        role: "tool".into(),
-        content: Some(serde_json::Value::String(params.result)),
-        tool_calls: None,
-        tool_call_id: Some(params.tool_call_id),
-    };
-    conversation.append(tool_msg)?;
 
     call_provider_and_respond(id, writer, conversation, provider, config).await
 }
@@ -239,19 +229,8 @@ pub async fn handle_connection(
         lifecycle::touch(&idle_map, &profile_name).await;
 
         match validate_request(&line) {
-            Ok(ValidatedRequest::LlmCall { id, params }) => {
-                handle_llm_call(
-                    id,
-                    params,
-                    &mut writer,
-                    conversation,
-                    provider.as_ref(),
-                    &config,
-                )
-                .await?;
-            }
-            Ok(ValidatedRequest::ToolResult { id, params }) => {
-                handle_tool_result(
+            Ok(ValidatedRequest::Turn { id, params }) => {
+                handle_turn(
                     id,
                     params,
                     &mut writer,
@@ -262,9 +241,7 @@ pub async fn handle_connection(
                 .await?;
             }
             Err(err) => {
-                writer
-                    .write_all(&send_line(&serde_json::to_string(&err)?))
-                    .await?;
+                write_json_line(&mut writer, &err).await?;
             }
         }
     }
