@@ -10,8 +10,8 @@ use conversation::ConversationLog;
 use mcp::McpManager;
 use profile::AgentProfile;
 use protocol::{
-    build_error, build_final_response, build_notification, send_line, validate_request,
-    Message, StopReason, StreamData, ToolCall, ValidatedRequest,
+    build_error, build_final_response, build_notification, send_line, validate_request, Message,
+    StopReason, StreamData, ToolCall, ValidatedRequest,
 };
 use provider::{collect_text, collect_tool_calls, LlmProvider, ProviderConfig, StreamEvent};
 
@@ -73,7 +73,9 @@ async fn call_llm(
     let history = conversation.history();
     let system = conversation.system_prompt();
 
-    let mut stream = provider.call(history, system, &tools, config).await
+    let mut stream = provider
+        .call(history, system, &tools, config)
+        .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
     let mut events: Vec<StreamEvent> = Vec::new();
@@ -217,10 +219,8 @@ async fn handle_turn(
         match ctx.mcp_manager.initialize().await {
             Ok(()) => {
                 let current_tools = ctx.conversation.tools();
-                let local_names: std::collections::HashSet<&str> = current_tools
-                    .iter()
-                    .map(|t| t.name.as_str())
-                    .collect();
+                let local_names: std::collections::HashSet<&str> =
+                    current_tools.iter().map(|t| t.name.as_str()).collect();
 
                 let mcp_tools: Vec<protocol::ToolDefinition> = ctx
                     .mcp_manager
@@ -253,11 +253,7 @@ async fn handle_turn(
         let result = match call_llm(writer, ctx.conversation, ctx.provider, ctx.config).await {
             Ok(r) => r,
             Err(e) => {
-                write_json_line(
-                    writer,
-                    &build_error(id, -32603, format!("{e}")),
-                )
-                .await?;
+                write_json_line(writer, &build_error(id, -32603, format!("{e}"))).await?;
                 return Ok(());
             }
         };
@@ -396,7 +392,9 @@ pub async fn handle_connection(
     Ok(())
 }
 
-pub fn bind_agent_socket(path: &Path) -> Result<UnixListener, Box<dyn std::error::Error + Send + Sync>> {
+pub fn bind_agent_socket(
+    path: &Path,
+) -> Result<UnixListener, Box<dyn std::error::Error + Send + Sync>> {
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
@@ -476,9 +474,18 @@ mod tests {
         assert_eq!(result[2].tool_call_id.as_deref(), Some("mcp-2"));
 
         // Verify content to catch swaps
-        assert_eq!(result[0].content.as_ref().unwrap().as_str(), Some("mcp result 1"));
-        assert_eq!(result[1].content.as_ref().unwrap().as_str(), Some("local result 1"));
-        assert_eq!(result[2].content.as_ref().unwrap().as_str(), Some("mcp result 2"));
+        assert_eq!(
+            result[0].content.as_ref().unwrap().as_str(),
+            Some("mcp result 1")
+        );
+        assert_eq!(
+            result[1].content.as_ref().unwrap().as_str(),
+            Some("local result 1")
+        );
+        assert_eq!(
+            result[2].content.as_ref().unwrap().as_str(),
+            Some("mcp result 2")
+        );
     }
 
     #[test]
@@ -498,10 +505,16 @@ mod tests {
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].tool_call_id.as_deref(), Some("local-1"));
-        assert_eq!(result[0].content.as_ref().unwrap().as_str(), Some("local 1"));
+        assert_eq!(
+            result[0].content.as_ref().unwrap().as_str(),
+            Some("local 1")
+        );
         assert_eq!(result[1].tool_call_id.as_deref(), Some("mcp-1"));
         assert_eq!(result[2].tool_call_id.as_deref(), Some("local-2"));
-        assert_eq!(result[2].content.as_ref().unwrap().as_str(), Some("local 2"));
+        assert_eq!(
+            result[2].content.as_ref().unwrap().as_str(),
+            Some("local 2")
+        );
     }
 
     #[test]
@@ -538,10 +551,7 @@ mod tests {
     #[test]
     fn pending_set_then_has_pending() {
         let mut state = PendingMcpState::new();
-        state.set(
-            vec![tool_result_msg("tc-1", "result")],
-            vec!["tc-1".into()],
-        );
+        state.set(vec![tool_result_msg("tc-1", "result")], vec!["tc-1".into()]);
         assert!(state.has_pending());
     }
 

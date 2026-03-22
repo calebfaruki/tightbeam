@@ -144,9 +144,7 @@ impl AgentProfile {
 
             mcp_servers.push(ResolvedMcp {
                 name: mcp_key,
-                url: mcp_override
-                    .url
-                    .unwrap_or_else(|| registry_mcp.url.clone()),
+                url: mcp_override.url.unwrap_or_else(|| registry_mcp.url.clone()),
                 auth_env: mcp_override
                     .auth_env
                     .unwrap_or_else(|| registry_mcp.auth_env.clone()),
@@ -382,7 +380,11 @@ tools = []
 "#;
         let profile = AgentProfile::resolve(toml, &reg).unwrap();
         assert_eq!(
-            profile.mcp_servers[0].tool_allowlist.as_ref().unwrap().len(),
+            profile.mcp_servers[0]
+                .tool_allowlist
+                .as_ref()
+                .unwrap()
+                .len(),
             0
         );
     }

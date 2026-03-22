@@ -115,7 +115,15 @@ async fn start_daemon(
     let listeners = vec![("test-agent".to_string(), listener)];
 
     tokio::spawn(async move {
-        run_daemon(listeners, profiles, conversations, providers, mcp_managers, logs_dir).await;
+        run_daemon(
+            listeners,
+            profiles,
+            conversations,
+            providers,
+            mcp_managers,
+            logs_dir,
+        )
+        .await;
     })
 }
 
@@ -684,8 +692,7 @@ mod mcp_integration {
             "jsonrpc": "2.0", "id": 2,
             "result": {"content": [{"type": "text", "text": "search result: found it"}]}
         });
-        let (mcp_url, _mcp_handle) =
-            start_mock_mcp_server(vec![tools_list, tool_result]).await;
+        let (mcp_url, _mcp_handle) = start_mock_mcp_server(vec![tools_list, tool_result]).await;
 
         let mcp_configs = vec![ResolvedMcp {
             name: "search".into(),
@@ -720,8 +727,7 @@ mod mcp_integration {
         ]);
 
         let call_log = provider.call_log();
-        let _handle =
-            start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
+        let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Search for rust"}]}}"#;
@@ -778,8 +784,7 @@ mod mcp_integration {
             "jsonrpc": "2.0", "id": 2,
             "result": {"content": [{"type": "text", "text": "mcp result"}]}
         });
-        let (mcp_url, _mcp_handle) =
-            start_mock_mcp_server(vec![tools_list, tool_result]).await;
+        let (mcp_url, _mcp_handle) = start_mock_mcp_server(vec![tools_list, tool_result]).await;
 
         let mcp_configs = vec![ResolvedMcp {
             name: "search".into(),
@@ -821,8 +826,7 @@ mod mcp_integration {
         ]);
 
         let call_log = provider.call_log();
-        let _handle =
-            start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
+        let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
         // Persistent connection for multi-turn
@@ -857,12 +861,12 @@ mod mcp_integration {
         assert_eq!(log.len(), 2, "should have 2 LLM calls");
         let second_msgs = &log[1].messages;
 
-        let has_mcp_result = second_msgs.iter().any(|m| {
-            m.role == "tool" && m.tool_call_id.as_deref() == Some("tc-mcp")
-        });
-        let has_local_result = second_msgs.iter().any(|m| {
-            m.role == "tool" && m.tool_call_id.as_deref() == Some("tc-local")
-        });
+        let has_mcp_result = second_msgs
+            .iter()
+            .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("tc-mcp"));
+        let has_local_result = second_msgs
+            .iter()
+            .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("tc-local"));
         assert!(
             has_mcp_result,
             "second LLM call should have MCP tool result (tc-mcp)"
@@ -897,17 +901,14 @@ mod mcp_integration {
         }];
 
         let provider = MockProvider::new(vec![vec![
-            StreamEvent::ContentDelta {
-                text: "OK".into(),
-            },
+            StreamEvent::ContentDelta { text: "OK".into() },
             StreamEvent::Done {
                 stop_reason: "end_turn".into(),
             },
         ]]);
 
         let call_log = provider.call_log();
-        let _handle =
-            start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
+        let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Hi"}]}}"#;
@@ -947,17 +948,14 @@ mod mcp_integration {
         }];
 
         let provider = MockProvider::new(vec![vec![
-            StreamEvent::ContentDelta {
-                text: "OK".into(),
-            },
+            StreamEvent::ContentDelta { text: "OK".into() },
             StreamEvent::Done {
                 stop_reason: "end_turn".into(),
             },
         ]]);
 
         let call_log = provider.call_log();
-        let _handle =
-            start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
+        let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Local bash","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Hi"}]}}"#;
@@ -1004,8 +1002,7 @@ mod mcp_integration {
         }];
 
         let provider = MockProvider::new(vec![]);
-        let _handle =
-            start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
+        let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hi"}]}}"#;

@@ -3,7 +3,11 @@ use crate::protocol::{Message, ToolCall, ToolDefinition};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) fn tool_result_message(tool_call_id: String, content: String, is_error: bool) -> Message {
+pub(crate) fn tool_result_message(
+    tool_call_id: String,
+    content: String,
+    is_error: bool,
+) -> Message {
     Message {
         role: "tool".into(),
         content: Some(serde_json::Value::String(content)),
@@ -178,9 +182,7 @@ fn extract_content_text(result: &serde_json::Value) -> String {
     }
 }
 
-async fn parse_mcp_response(
-    response: reqwest::Response,
-) -> Result<serde_json::Value, String> {
+async fn parse_mcp_response(response: reqwest::Response) -> Result<serde_json::Value, String> {
     let content_type = response
         .headers()
         .get("content-type")
@@ -338,9 +340,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}");
 
-        let resps = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::from(responses),
-        ));
+        let resps = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            responses,
+        )));
 
         let handle = tokio::spawn(async move {
             loop {
@@ -630,16 +632,23 @@ mod tests {
 
     #[test]
     fn parse_sse_response() {
-        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+        let body =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
         let result = parse_sse_jsonrpc(body).unwrap();
-        assert!(result["tools"].is_array(), "tools should be an array, got: {result}");
+        assert!(
+            result["tools"].is_array(),
+            "tools should be an array, got: {result}"
+        );
     }
 
     #[test]
     fn parse_json_response() {
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
         let result = parse_json_jsonrpc(body).unwrap();
-        assert!(result["tools"].is_array(), "tools should be an array, got: {result}");
+        assert!(
+            result["tools"].is_array(),
+            "tools should be an array, got: {result}"
+        );
     }
 
     #[test]
@@ -671,9 +680,9 @@ mod tests {
         let url = format!("http://{addr}");
 
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let resps = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::from(responses),
-        ));
+        let resps = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            responses,
+        )));
 
         let handle = tokio::spawn(async move {
             loop {
@@ -735,8 +744,7 @@ mod tests {
             "result": {"content": [{"type": "text", "text": "retry succeeded"}]}
         });
 
-        let (url, _handle) =
-            start_dropping_mock(vec![1], vec![tools_list, call_success]).await;
+        let (url, _handle) = start_dropping_mock(vec![1], vec![tools_list, call_success]).await;
 
         let mut conn = McpConnection::new(url, "test-token".into());
         conn.discover_tools(None).await.unwrap();
@@ -770,8 +778,7 @@ mod tests {
             ]}
         });
 
-        let (url, _handle) =
-            start_dropping_mock(vec![1, 2], vec![tools_list]).await;
+        let (url, _handle) = start_dropping_mock(vec![1, 2], vec![tools_list]).await;
 
         let mut conn = McpConnection::new(url, "test-token".into());
         conn.discover_tools(None).await.unwrap();
@@ -783,7 +790,11 @@ mod tests {
         };
         let msg = conn.call_tool(&tool_call).await;
 
-        assert_eq!(msg.is_error, Some(true), "should be error after retry fails");
+        assert_eq!(
+            msg.is_error,
+            Some(true),
+            "should be error after retry fails"
+        );
         assert_eq!(msg.tool_call_id.as_deref(), Some("tc-fail"));
     }
 }

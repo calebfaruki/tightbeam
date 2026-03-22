@@ -280,5 +280,13 @@ async fn main() {
         }
     }
 
-    run_daemon(listeners, profiles, conversations, providers, mcp_managers, log_base).await;
+    run_daemon(
+        listeners,
+        profiles,
+        conversations,
+        providers,
+        mcp_managers,
+        log_base,
+    )
+    .await;
 }
