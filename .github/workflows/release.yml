@@ -71,7 +71,7 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
       - name: Build static binary
         run: |
-          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p tightbeam-shim
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p tightbeam-runtime
       - name: Rename artifact
         run: cp target/${{ matrix.target }}/release/tightbeam ${{ matrix.artifact }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
