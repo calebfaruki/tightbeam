@@ -14,7 +14,7 @@ Three components:
 
 3. **Registry + profiles** — a global registry defines available LLM providers and MCP servers. Per-agent TOML profiles reference registry entries by key, with optional overrides and MCP tool allowlists. Each agent gets its own unix socket. The agent never sees which model it talks to.
 
-The runtime sends new messages via `turn` requests. The daemon attaches the API key from the host environment, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to per-agent NDJSON files on the host.
+The runtime sends new messages via `turn` requests over a length-prefixed binary framing protocol. The daemon attaches the API key from the host environment, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to per-agent NDJSON files on the host.
 
 ## Why Tightbeam
 
@@ -149,7 +149,17 @@ The runtime runs inside the container. It connects to the daemon socket, loads a
 
 ## Socket Protocol
 
-JSON-RPC 2.0 over NDJSON. Each line is one complete JSON object.
+JSON-RPC 2.0 with length-prefixed binary framing. Each message is preceded by a 4-byte big-endian `u32` payload length, followed by the UTF-8 JSON payload.
+
+```
+[4 bytes: u32 big-endian length][payload bytes]
+```
+
+All `content` fields are arrays of typed blocks:
+
+```json
+{"role": "user", "content": [{"type": "text", "text": "Hello"}]}
+```
 
 ### Request: `turn`
 
@@ -163,7 +173,7 @@ The runtime sends new messages, tool definitions, and optionally a system prompt
   "params": {
     "system": "You are a coding assistant.",
     "tools": [{"name": "bash", "description": "Run a command", "parameters": {"type": "object"}}],
-    "messages": [{"role": "user", "content": "What files are in src?"}]
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "What files are in src?"}]}]
   }
 }
 ```
@@ -176,7 +186,7 @@ Tool results are sent as messages in a subsequent `turn`:
   "id": 2,
   "method": "turn",
   "params": {
-    "messages": [{"role": "tool", "tool_call_id": "tc-001", "content": "main.rs\nlib.rs\n"}]
+    "messages": [{"role": "tool", "tool_call_id": "tc-001", "content": [{"type": "text", "text": "main.rs\nlib.rs\n"}]}]
   }
 }
 ```
@@ -200,7 +210,7 @@ Has `id` — signals completion of this turn.
   "id": 1,
   "result": {
     "stop_reason": "end_turn",
-    "content": "The src directory contains main.rs and lib.rs."
+    "content": [{"type": "text", "text": "The src directory contains main.rs and lib.rs."}]
   }
 }
 ```

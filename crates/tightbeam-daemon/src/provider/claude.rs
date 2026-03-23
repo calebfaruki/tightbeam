@@ -1,9 +1,10 @@
-use crate::protocol::{Message, ToolDefinition};
+use crate::protocol::{ContentBlock, Message, ToolDefinition};
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent};
 use crate::streaming;
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
+use tightbeam_protocol::content_text;
 
 pub struct ClaudeProvider {
     client: reqwest::Client,
@@ -23,6 +24,10 @@ impl ClaudeProvider {
     }
 }
 
+// Translates internal Message types to Claude API format.
+// NOTE: ContentBlock currently only has Text. Phase 3 will add file_incoming blocks
+// which don't map to any Claude API content type. This function will need explicit
+// handling to convert them (e.g., base64 images → image content blocks) or filter them.
 fn build_api_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     messages
         .iter()
@@ -30,33 +35,34 @@ fn build_api_messages(messages: &[Message]) -> Vec<serde_json::Value> {
             let mut obj = serde_json::Map::new();
             obj.insert("role".into(), serde_json::Value::String(m.role.clone()));
 
-            if let Some(ref content) = m.content {
-                obj.insert("content".into(), content.clone());
+            if let Some(ref blocks) = m.content {
+                let value = serde_json::to_value(blocks).unwrap_or(serde_json::Value::Null);
+                obj.insert("content".into(), value);
             }
 
             if let Some(ref tool_calls) = m.tool_calls {
-                let content_blocks: Vec<serde_json::Value> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.input,
-                        })
-                    })
-                    .collect();
+                let mut content_blocks: Vec<serde_json::Value> = Vec::new();
 
-                if let Some(serde_json::Value::String(text)) = m.content.as_ref() {
-                    let mut blocks = vec![serde_json::json!({
-                        "type": "text",
-                        "text": text,
-                    })];
-                    blocks.extend(content_blocks);
-                    obj.insert("content".into(), serde_json::Value::Array(blocks));
-                } else {
-                    obj.insert("content".into(), serde_json::Value::Array(content_blocks));
+                if let Some(ref blocks) = m.content {
+                    for block in blocks {
+                        let ContentBlock::Text { text } = block;
+                        content_blocks.push(serde_json::json!({
+                            "type": "text",
+                            "text": text,
+                        }));
+                    }
                 }
+
+                for tc in tool_calls {
+                    content_blocks.push(serde_json::json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.input,
+                    }));
+                }
+
+                obj.insert("content".into(), serde_json::Value::Array(content_blocks));
             }
 
             if m.role == "tool" {
@@ -64,19 +70,14 @@ fn build_api_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                     obj.remove("role");
                     obj.insert("role".into(), serde_json::Value::String("user".into()));
 
-                    let content_text = m
-                        .content
-                        .as_ref()
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let text = content_text(&m.content).unwrap_or("").to_string();
 
                     obj.insert(
                         "content".into(),
                         serde_json::json!([{
                             "type": "tool_result",
                             "tool_use_id": tool_call_id,
-                            "content": content_text,
+                            "content": text,
                         }]),
                     );
                 }
@@ -165,7 +166,7 @@ mod claude_api {
     fn user_message_converts_to_api_format() {
         let messages = vec![Message {
             role: "user".into(),
-            content: Some(serde_json::Value::String("Hello".into())),
+            content: Some(ContentBlock::text_content("Hello")),
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
@@ -173,7 +174,8 @@ mod claude_api {
         let api = build_api_messages(&messages);
         assert_eq!(api.len(), 1);
         assert_eq!(api[0]["role"], "user");
-        assert_eq!(api[0]["content"], "Hello");
+        assert_eq!(api[0]["content"][0]["type"], "text");
+        assert_eq!(api[0]["content"][0]["text"], "Hello");
     }
 
     #[test]
@@ -200,7 +202,7 @@ mod claude_api {
     fn tool_result_converts_to_user_with_tool_result_block() {
         let messages = vec![Message {
             role: "tool".into(),
-            content: Some(serde_json::Value::String("file list here".into())),
+            content: Some(ContentBlock::text_content("file list here")),
             tool_calls: None,
             tool_call_id: Some("tc-1".into()),
             is_error: None,

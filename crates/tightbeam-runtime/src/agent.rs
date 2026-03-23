@@ -1,7 +1,7 @@
 use crate::config::RuntimeConfig;
 use crate::connection::DaemonConnection;
 use crate::tools;
-use tightbeam_protocol::{Message, StopReason, TurnRequest};
+use tightbeam_protocol::{ContentBlock, Message, StopReason, TurnRequest};
 
 pub(crate) async fn run_agent(config: RuntimeConfig) -> Result<(), String> {
     let system_prompt = tokio::fs::read_to_string(&config.system_prompt_path)
@@ -24,7 +24,7 @@ pub(crate) async fn run_agent(config: RuntimeConfig) -> Result<(), String> {
 
         let user_msg = Message {
             role: "user".into(),
-            content: Some(serde_json::Value::String(human.content)),
+            content: Some(human.content),
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
@@ -87,7 +87,7 @@ pub(crate) async fn run_agent(config: RuntimeConfig) -> Result<(), String> {
                         let (output, is_error) = handle.join_err(i).await?;
                         tool_result_messages.push(Message {
                             role: "tool".into(),
-                            content: Some(serde_json::Value::String(output)),
+                            content: Some(ContentBlock::text_content(output)),
                             tool_calls: None,
                             tool_call_id: Some(tool_calls[i].id.clone()),
                             is_error: if is_error { Some(true) } else { None },
@@ -120,33 +120,30 @@ impl<T> JoinHandleExt<T> for tokio::task::JoinHandle<T> {
 #[cfg(test)]
 mod agent_tests {
     use super::*;
-    use tightbeam_protocol::{ToolCall, TurnResponse};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tightbeam_protocol::framing::{read_frame, write_frame};
+    use tightbeam_protocol::{ContentBlock, ToolCall, TurnResponse};
 
     struct MockDaemon {
-        reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+        reader: tokio::net::unix::OwnedReadHalf,
         writer: tokio::net::unix::OwnedWriteHalf,
     }
 
     impl MockDaemon {
         async fn read_turn(&mut self) -> serde_json::Value {
-            let mut buf = String::new();
-            self.reader.read_line(&mut buf).await.unwrap();
-            serde_json::from_str(buf.trim()).unwrap()
+            let frame = read_frame(&mut self.reader).await.unwrap().unwrap();
+            serde_json::from_slice(&frame).unwrap()
         }
 
         async fn write_json(&mut self, value: &serde_json::Value) {
-            let mut line = serde_json::to_string(value).unwrap();
-            line.push('\n');
-            self.writer.write_all(line.as_bytes()).await.unwrap();
-            self.writer.flush().await.unwrap();
+            let payload = serde_json::to_vec(value).unwrap();
+            write_frame(&mut self.writer, &payload).await.unwrap();
         }
 
         async fn send_human_message(&mut self, content: &str) {
             self.write_json(&serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "human_message",
-                "params": {"content": content}
+                "params": {"content": [{"type": "text", "text": content}]}
             }))
             .await;
         }
@@ -195,7 +192,7 @@ mod agent_tests {
         let (read, write) = stream.into_split();
 
         let mock = MockDaemon {
-            reader: BufReader::new(read),
+            reader: read,
             writer: write,
         };
 
@@ -210,7 +207,6 @@ mod agent_tests {
         let turn = mock.read_turn().await;
 
         assert_eq!(turn["method"], "turn");
-        // A2: positive assertion — first turn MUST include system and tools
         assert!(
             turn["params"]["system"].is_string(),
             "first turn must include system prompt"
@@ -222,14 +218,13 @@ mod agent_tests {
         );
         assert!(!turn["params"]["tools"].as_array().unwrap().is_empty());
         assert_eq!(turn["params"]["messages"][0]["role"], "user");
-        assert_eq!(turn["params"]["messages"][0]["content"], "Hello");
+        assert_eq!(turn["params"]["messages"][0]["content"][0]["text"], "Hello");
 
-        // Respond with end_turn to complete the conversation
         mock.send_response(
             turn["id"].as_u64().unwrap(),
             &TurnResponse {
                 stop_reason: StopReason::EndTurn,
-                content: Some("Hi there!".into()),
+                content: Some(ContentBlock::text_content("Hi there!")),
                 tool_calls: None,
             },
         )
@@ -241,9 +236,8 @@ mod agent_tests {
 
         assert!(turn2["params"].get("system").is_none() || turn2["params"]["system"].is_null());
         assert!(turn2["params"].get("tools").is_none() || turn2["params"]["tools"].is_null());
-        assert_eq!(turn2["params"]["messages"][0]["content"], "Second");
+        assert_eq!(turn2["params"]["messages"][0]["content"][0]["text"], "Second");
 
-        // Close by dropping mock → agent gets disconnect error
         drop(mock);
         let _ = agent_handle.await;
     }
@@ -256,7 +250,6 @@ mod agent_tests {
         let turn1 = mock.read_turn().await;
         let id1 = turn1["id"].as_u64().unwrap();
 
-        // Respond with tool_use
         mock.send_response(
             id1,
             &TurnResponse {
@@ -271,7 +264,6 @@ mod agent_tests {
         )
         .await;
 
-        // Agent should execute tool and send results
         let turn2 = mock.read_turn().await;
         let id2 = turn2["id"].as_u64().unwrap();
         assert!(id2 > id1);
@@ -279,25 +271,22 @@ mod agent_tests {
         let messages = turn2["params"]["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "tool");
-        // A1: verify tool_call_id matches exactly
         assert_eq!(
             messages[0]["tool_call_id"], "tc-1",
             "tool_call_id must match the request"
         );
-        let content = messages[0]["content"].as_str().unwrap();
-        assert!(content.contains("tool_output"));
-        // A1: verify is_error absent for successful tool execution
+        let content_text = messages[0]["content"][0]["text"].as_str().unwrap();
+        assert!(content_text.contains("tool_output"));
         assert!(
             messages[0].get("is_error").is_none() || messages[0]["is_error"].is_null(),
             "successful tool should not have is_error set"
         );
 
-        // Now end the turn
         mock.send_response(
             id2,
             &TurnResponse {
                 stop_reason: StopReason::EndTurn,
-                content: Some("Done.".into()),
+                content: Some(ContentBlock::text_content("Done.")),
                 tool_calls: None,
             },
         )
@@ -315,7 +304,6 @@ mod agent_tests {
         let turn1 = mock.read_turn().await;
         let id1 = turn1["id"].as_u64().unwrap();
 
-        // Iteration 1: tool_use
         mock.send_response(
             id1,
             &TurnResponse {
@@ -333,7 +321,6 @@ mod agent_tests {
         let turn2 = mock.read_turn().await;
         let id2 = turn2["id"].as_u64().unwrap();
 
-        // Iteration 2: tool_use again
         mock.send_response(
             id2,
             &TurnResponse {
@@ -348,12 +335,9 @@ mod agent_tests {
         )
         .await;
 
-        // Agent should stop here (max_iterations=2) and go back to waiting
-        // for the next human message. It should NOT read or send another turn.
-        // Send another human message to confirm it's waiting.
         mock.send_human_message("After limit").await;
         let turn3 = mock.read_turn().await;
-        assert_eq!(turn3["params"]["messages"][0]["content"], "After limit");
+        assert_eq!(turn3["params"]["messages"][0]["content"][0]["text"], "After limit");
 
         drop(mock);
         let _ = agent_handle.await;
@@ -367,12 +351,11 @@ mod agent_tests {
         let turn1 = mock.read_turn().await;
         let id1 = turn1["id"].as_u64().unwrap();
 
-        // Respond with max_tokens (should be treated as end_turn)
         mock.send_response(
             id1,
             &TurnResponse {
                 stop_reason: StopReason::MaxTokens,
-                content: Some("partial response...".into()),
+                content: Some(ContentBlock::text_content("partial response...")),
                 tool_calls: Some(vec![ToolCall {
                     id: "tc-incomplete".into(),
                     name: "bash".into(),
@@ -382,9 +365,6 @@ mod agent_tests {
         )
         .await;
 
-        // A3: Agent should discard tool_calls and go back to waiting.
-        // The NEXT thing the mock receives must be a turn from the next human message,
-        // NOT a tool result turn. This proves tools were not executed.
         mock.send_human_message("Next").await;
         let turn2 = mock.read_turn().await;
         let messages = turn2["params"]["messages"].as_array().unwrap();
@@ -393,7 +373,7 @@ mod agent_tests {
             messages[0]["role"], "user",
             "next turn should be a user message, not a tool result"
         );
-        assert_eq!(messages[0]["content"], "Next");
+        assert_eq!(messages[0]["content"][0]["text"], "Next");
         assert!(
             messages[0].get("tool_call_id").is_none() || messages[0]["tool_call_id"].is_null(),
             "next turn should not contain tool_call_id (would indicate tool results were sent)"
@@ -439,7 +419,7 @@ mod agent_tests {
             id2,
             &TurnResponse {
                 stop_reason: StopReason::EndTurn,
-                content: Some("Done.".into()),
+                content: Some(ContentBlock::text_content("Done.")),
                 tool_calls: None,
             },
         )

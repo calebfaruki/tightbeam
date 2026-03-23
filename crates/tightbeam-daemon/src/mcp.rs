@@ -1,5 +1,5 @@
 use crate::profile::ResolvedMcp;
-use crate::protocol::{Message, ToolCall, ToolDefinition};
+use crate::protocol::{ContentBlock, Message, ToolCall, ToolDefinition};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,7 +10,7 @@ pub(crate) fn tool_result_message(
 ) -> Message {
     Message {
         role: "tool".into(),
-        content: Some(serde_json::Value::String(content)),
+        content: Some(ContentBlock::text_content(content)),
         tool_calls: None,
         tool_call_id: Some(tool_call_id),
         is_error: if is_error { Some(true) } else { None },
@@ -330,6 +330,7 @@ impl McpManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tightbeam_protocol::content_text;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -493,7 +494,7 @@ mod tests {
         assert_eq!(msg.role, "tool");
         assert_eq!(msg.tool_call_id.as_deref(), Some("tc-1"));
         assert_eq!(
-            msg.content.as_ref().and_then(|v| v.as_str()),
+            content_text(&msg.content),
             Some("PR #42 created successfully")
         );
         assert!(msg.is_error.is_none());
@@ -523,7 +524,7 @@ mod tests {
         assert_eq!(msg.role, "tool");
         assert_eq!(msg.tool_call_id.as_deref(), Some("tc-2"));
         assert_eq!(msg.is_error, Some(true));
-        let content_str = msg.content.as_ref().and_then(|v| v.as_str()).unwrap();
+        let content_str = content_text(&msg.content).unwrap();
         assert!(content_str.contains("tool not found"), "{content_str}");
     }
 
@@ -606,8 +607,8 @@ mod tests {
         assert_eq!(results[0].tool_call_id.as_deref(), Some("tc-1"));
         assert_eq!(results[1].tool_call_id.as_deref(), Some("tc-2"));
         // Verify actual content was returned (not empty or swapped)
-        let c0 = results[0].content.as_ref().unwrap().as_str().unwrap();
-        let c1 = results[1].content.as_ref().unwrap().as_str().unwrap();
+        let c0 = content_text(&results[0].content).unwrap();
+        let c1 = content_text(&results[1].content).unwrap();
         assert!(c0.contains("result_a"), "first result content: {c0}");
         assert!(c1.contains("result_a"), "second result content: {c1}");
         assert!(results[0].is_error.is_none(), "should not be error");
@@ -760,7 +761,7 @@ mod tests {
         // Should succeed via retry
         assert!(msg.is_error.is_none(), "should succeed on retry, got error");
         assert_eq!(
-            msg.content.as_ref().unwrap().as_str(),
+            content_text(&msg.content),
             Some("retry succeeded")
         );
         assert_eq!(msg.tool_call_id.as_deref(), Some("tc-retry"));

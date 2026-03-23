@@ -10,7 +10,7 @@ use conversation::ConversationLog;
 use mcp::McpManager;
 use profile::AgentProfile;
 use protocol::{
-    build_error, build_final_response, build_notification, send_line, validate_request, Message,
+    build_error, build_final_response, build_notification, validate_request, ContentBlock, Message,
     StopReason, StreamData, ToolCall, ValidatedRequest,
 };
 use provider::{collect_text, collect_tool_calls, LlmProvider, ProviderConfig, StreamEvent};
@@ -20,7 +20,8 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tightbeam_protocol::framing::{read_frame, write_frame};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 
@@ -29,14 +30,12 @@ pub type ConversationMap = Arc<RwLock<HashMap<String, ConversationLog>>>;
 pub type ProviderMap = Arc<HashMap<String, Box<dyn LlmProvider>>>;
 pub type McpManagerMap = Arc<RwLock<HashMap<String, McpManager>>>;
 
-async fn write_json_line(
+async fn write_framed_json(
     writer: &mut (impl AsyncWriteExt + Unpin),
     value: &impl serde::Serialize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    writer
-        .write_all(&send_line(&serde_json::to_string(value)?))
-        .await?;
-    writer.flush().await?;
+    let payload = serde_json::to_vec(value)?;
+    write_frame(writer, &payload).await?;
     Ok(())
 }
 
@@ -52,14 +51,14 @@ async fn send_notification(
     writer: &mut (impl AsyncWriteExt + Unpin),
     data: StreamData,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    write_json_line(writer, &build_notification("content", data)).await
+    write_framed_json(writer, &build_notification("content", data)).await
 }
 
-// --- LLM call (extracted from old call_provider_and_respond) ---
+// --- LLM call ---
 
 struct LlmResult {
     stop_reason: StopReason,
-    content: Option<String>,
+    content: Option<Vec<ContentBlock>>,
     tool_calls: Vec<ToolCall>,
 }
 
@@ -104,11 +103,14 @@ async fn call_llm(
 
     let stop_reason = StopReason::from_str_lossy(&stop_reason_str);
     let tool_calls = collect_tool_calls(&events);
-    let content = collect_text(&events);
+    // collect_text concatenates streaming ContentDelta events into one string.
+    // Wrapping in a single ContentBlock::Text is correct — the streaming API produces
+    // one continuous text stream. Tool use events are collected separately above.
+    let content = collect_text(&events).map(ContentBlock::text_content);
 
     let assistant_msg = Message {
         role: "assistant".into(),
-        content: content.clone().map(serde_json::Value::String),
+        content: content.clone(),
         tool_calls: none_if_empty(tool_calls.clone()),
         tool_call_id: None,
         is_error: None,
@@ -243,7 +245,8 @@ async fn handle_turn(
                 ctx.conversation.set_mcp_tools(mcp_tools);
             }
             Err(e) => {
-                write_json_line(writer, &build_error(id, -32603, format!("MCP init: {e}"))).await?;
+                write_framed_json(writer, &build_error(id, -32603, format!("MCP init: {e}")))
+                    .await?;
                 return Ok(());
             }
         }
@@ -253,7 +256,7 @@ async fn handle_turn(
         let result = match call_llm(writer, ctx.conversation, ctx.provider, ctx.config).await {
             Ok(r) => r,
             Err(e) => {
-                write_json_line(writer, &build_error(id, -32603, format!("{e}"))).await?;
+                write_framed_json(writer, &build_error(id, -32603, format!("{e}"))).await?;
                 return Ok(());
             }
         };
@@ -266,7 +269,7 @@ async fn handle_turn(
                     none_if_empty(result.tool_calls),
                     result.content,
                 );
-                write_json_line(writer, &resp).await?;
+                write_framed_json(writer, &resp).await?;
                 return Ok(());
             }
             StopReason::ToolUse => {
@@ -282,24 +285,21 @@ async fn handle_turn(
                 };
 
                 if local_calls.is_empty() {
-                    // All MCP — append results, loop internally
                     ctx.conversation.append_many(mcp_results)?;
                     continue;
                 }
 
                 if mcp_calls.is_empty() {
-                    // All local — return to runtime
                     let resp = build_final_response(
                         id,
                         StopReason::ToolUse,
                         Some(local_calls),
                         result.content,
                     );
-                    write_json_line(writer, &resp).await?;
+                    write_framed_json(writer, &resp).await?;
                     return Ok(());
                 }
 
-                // Mixed — store MCP results, send local to runtime
                 let call_order: Vec<String> = mcp_calls
                     .iter()
                     .chain(local_calls.iter())
@@ -314,7 +314,7 @@ async fn handle_turn(
                     Some(local_calls),
                     result.content,
                 );
-                write_json_line(writer, &resp).await?;
+                write_framed_json(writer, &resp).await?;
                 return Ok(());
             }
         }
@@ -330,8 +330,7 @@ pub async fn handle_connection(
     mcp_managers: McpManagerMap,
     logs_base_dir: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let (mut reader, mut writer) = stream.into_split();
 
     let profile = profiles
         .get(&profile_name)
@@ -360,19 +359,18 @@ pub async fn handle_connection(
 
     let mut pending = PendingMcpState::new();
 
-    let mut line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {}
+        let payload = match read_frame(&mut reader).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => break,
             Err(e) => {
                 tracing::warn!("connection read error for {profile_name}: {e}");
                 break;
             }
-        }
+        };
 
-        match validate_request(&line) {
+        let raw = String::from_utf8_lossy(&payload);
+        match validate_request(&raw) {
             Ok(ValidatedRequest::Turn { id, params }) => {
                 let mut ctx = TurnContext {
                     conversation,
@@ -384,7 +382,7 @@ pub async fn handle_connection(
                 handle_turn(id, params, &mut writer, &mut ctx).await?;
             }
             Err(err) => {
-                write_json_line(&mut writer, &err).await?;
+                write_framed_json(&mut writer, &err).await?;
             }
         }
     }
@@ -449,6 +447,7 @@ pub async fn run_daemon(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tightbeam_protocol::content_text;
 
     fn tool_result_msg(tc_id: &str, content: &str) -> Message {
         mcp::tool_result_message(tc_id.into(), content.into(), false)
@@ -473,19 +472,9 @@ mod tests {
         assert_eq!(result[1].tool_call_id.as_deref(), Some("local-1"));
         assert_eq!(result[2].tool_call_id.as_deref(), Some("mcp-2"));
 
-        // Verify content to catch swaps
-        assert_eq!(
-            result[0].content.as_ref().unwrap().as_str(),
-            Some("mcp result 1")
-        );
-        assert_eq!(
-            result[1].content.as_ref().unwrap().as_str(),
-            Some("local result 1")
-        );
-        assert_eq!(
-            result[2].content.as_ref().unwrap().as_str(),
-            Some("mcp result 2")
-        );
+        assert_eq!(content_text(&result[0].content), Some("mcp result 1"));
+        assert_eq!(content_text(&result[1].content), Some("local result 1"));
+        assert_eq!(content_text(&result[2].content), Some("mcp result 2"));
     }
 
     #[test]
@@ -493,7 +482,6 @@ mod tests {
         let mut mcp = HashMap::new();
         mcp.insert("mcp-1".into(), tool_result_msg("mcp-1", "mcp"));
 
-        // Local messages in reverse order relative to call_order
         let local = vec![
             tool_result_msg("local-2", "local 2"),
             tool_result_msg("local-1", "local 1"),
@@ -505,16 +493,10 @@ mod tests {
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].tool_call_id.as_deref(), Some("local-1"));
-        assert_eq!(
-            result[0].content.as_ref().unwrap().as_str(),
-            Some("local 1")
-        );
+        assert_eq!(content_text(&result[0].content), Some("local 1"));
         assert_eq!(result[1].tool_call_id.as_deref(), Some("mcp-1"));
         assert_eq!(result[2].tool_call_id.as_deref(), Some("local-2"));
-        assert_eq!(
-            result[2].content.as_ref().unwrap().as_str(),
-            Some("local 2")
-        );
+        assert_eq!(content_text(&result[2].content), Some("local 2"));
     }
 
     #[test]
@@ -524,7 +506,6 @@ mod tests {
 
         let local = vec![tool_result_msg("local-1", "local")];
 
-        // "ghost" is in call_order but not in either map
         let order = vec!["mcp-1".into(), "ghost".into(), "local-1".into()];
 
         let result = interleave_results(mcp, local, order);
@@ -586,8 +567,8 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         let a = &results["tc-a"];
-        assert_eq!(a.content.as_ref().unwrap().as_str(), Some("result a"));
+        assert_eq!(content_text(&a.content), Some("result a"));
         let b = &results["tc-b"];
-        assert_eq!(b.content.as_ref().unwrap().as_str(), Some("result b"));
+        assert_eq!(content_text(&b.content), Some("result b"));
     }
 }

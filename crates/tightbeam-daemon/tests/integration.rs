@@ -12,7 +12,7 @@ use tightbeam_daemon::provider::{self, LlmProvider, StreamEvent};
 use tightbeam_daemon::{
     bind_agent_socket, run_daemon, ConversationMap, McpManagerMap, ProfileMap, ProviderMap,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tightbeam_protocol::framing::{read_frame, write_frame};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 
@@ -128,48 +128,37 @@ async fn start_daemon(
 }
 
 async fn send_and_collect(sock_path: &std::path::Path, request_json: &str) -> Vec<String> {
-    let mut stream = UnixStream::connect(sock_path).await.unwrap();
-    stream
-        .write_all(format!("{request_json}\n").as_bytes())
+    let stream = UnixStream::connect(sock_path).await.unwrap();
+    let (mut reader, mut writer) = stream.into_split();
+
+    write_frame(&mut writer, request_json.as_bytes())
         .await
         .unwrap();
-    stream.shutdown().await.unwrap();
+    drop(writer);
 
-    let mut reader = BufReader::new(stream);
     let mut lines = Vec::new();
-    let mut buf = String::new();
-    while reader.read_line(&mut buf).await.unwrap() > 0 {
-        lines.push(buf.trim().to_string());
-        buf.clear();
+    while let Ok(Some(frame)) = read_frame(&mut reader).await {
+        lines.push(String::from_utf8_lossy(&frame).to_string());
     }
     lines
 }
 
 async fn send_and_read_response(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    reader: &mut tokio::net::unix::OwnedReadHalf,
     request_json: &str,
 ) -> Vec<String> {
-    writer
-        .write_all(format!("{request_json}\n").as_bytes())
-        .await
-        .unwrap();
-    writer.flush().await.unwrap();
+    write_frame(writer, request_json.as_bytes()).await.unwrap();
 
     let mut lines = Vec::new();
-    let mut buf = String::new();
     loop {
-        buf.clear();
-        reader.read_line(&mut buf).await.unwrap();
-        let trimmed = buf.trim().to_string();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let has_id = serde_json::from_str::<serde_json::Value>(&trimmed)
+        let frame = read_frame(reader).await.unwrap().unwrap();
+        let text = String::from_utf8_lossy(&frame).to_string();
+        let has_id = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .and_then(|v| v.get("id").cloned())
             .is_some();
-        lines.push(trimmed);
+        lines.push(text);
         if has_id {
             break;
         }
@@ -247,7 +236,7 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hi"}]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
         let notif_count = count_notifications(&lines);
@@ -260,7 +249,7 @@ mod protocol_integration {
         assert_eq!(final_resp.id, Some(1));
         let result = final_resp.result.unwrap();
         assert_eq!(result["stop_reason"], "end_turn");
-        assert_eq!(result["content"], "Hello world");
+        assert_eq!(result["content"][0]["text"], "Hello world");
         assert!(result.get("tool_calls").is_none());
 
         let _ = std::fs::remove_dir_all(&logs);
@@ -288,7 +277,7 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"List files"}]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"List files"}]}]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
         let final_resp = find_final_response(&lines);
@@ -312,7 +301,6 @@ mod protocol_integration {
         let logs = test_logs_dir("toolcont");
 
         let provider = MockProvider::new(vec![
-            // Response to first turn
             vec![
                 StreamEvent::ToolUseStart {
                     id: "tc-1".into(),
@@ -325,7 +313,6 @@ mod protocol_integration {
                     stop_reason: "tool_use".into(),
                 },
             ],
-            // Response to tool result turn
             vec![
                 StreamEvent::ContentDelta {
                     text: "Files: main.rs".into(),
@@ -340,27 +327,21 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        // Single persistent connection for the full tool loop
         let stream = UnixStream::connect(&sock).await.unwrap();
-        let (read_half, write_half) = stream.into_split();
-        let mut writer = write_half;
-        let mut reader = BufReader::new(read_half);
+        let (mut reader, mut writer) = stream.into_split();
 
-        // Step 1: turn with system, tools, and user message
-        let request1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","tools":[{"name":"bash","description":"Run a command","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"List files"}]}}"#;
+        let request1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","tools":[{"name":"bash","description":"Run a command","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"List files"}]}]}}"#;
         let lines1 = send_and_read_response(&mut writer, &mut reader, request1).await;
         let resp1 = find_final_response(&lines1);
         assert_eq!(resp1.result.as_ref().unwrap()["stop_reason"], "tool_use");
 
-        // Step 2: turn with tool results on same connection
-        let request2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-1","content":"main.rs\nlib.rs\n"}]}}"#;
+        let request2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-1","content":[{"type":"text","text":"main.rs\nlib.rs\n"}]}]}}"#;
         let lines2 = send_and_read_response(&mut writer, &mut reader, request2).await;
         let resp2 = find_final_response(&lines2);
         let result2 = resp2.result.unwrap();
         assert_eq!(result2["stop_reason"], "end_turn");
-        assert_eq!(result2["content"], "Files: main.rs");
+        assert_eq!(result2["content"][0]["text"], "Files: main.rs");
 
-        // Verify tools were cached and passed to the second provider call
         let log = call_log.lock().unwrap();
         assert_eq!(log.len(), 2);
         assert!(
@@ -390,11 +371,10 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hello"}]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Hello"}]}]}}"#;
         let lines = send_and_collect(&sock, request).await;
-        let _ = find_final_response(&lines); // ensure success
+        let _ = find_final_response(&lines);
 
-        // Small delay for file flush
         tokio::time::sleep(WAIT).await;
 
         let log_path = logs.join("test-agent/conversation.ndjson");
@@ -506,18 +486,13 @@ mod protocol_integration {
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
 
-        // Single connection for both calls
         let stream = UnixStream::connect(&sock).await.unwrap();
-        let (read_half, write_half) = stream.into_split();
-        let mut writer = write_half;
-        let mut reader = BufReader::new(read_half);
+        let (mut reader, mut writer) = stream.into_split();
 
-        // First turn with system prompt
-        let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","messages":[{"role":"user","content":"Hi"}]}}"#;
+        let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}}"#;
         let _ = send_and_read_response(&mut writer, &mut reader, req1).await;
 
-        // Second turn with different system prompt (should be ignored)
-        let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"system":"Ignored","messages":[{"role":"user","content":"Hello again"}]}}"#;
+        let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"system":"Ignored","messages":[{"role":"user","content":[{"type":"text","text":"Hello again"}]}]}}"#;
         let _ = send_and_read_response(&mut writer, &mut reader, req2).await;
 
         let log = call_log.lock().unwrap();
@@ -666,11 +641,11 @@ mod mcp_integration {
         let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), vec![]).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hi"}]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
         let final_resp = find_final_response(&lines);
-        assert_eq!(final_resp.result.unwrap()["content"], "Hello");
+        assert_eq!(final_resp.result.unwrap()["content"][0]["text"], "Hello");
 
         let _ = std::fs::remove_dir_all(&logs);
         let _ = std::fs::remove_file(&sock);
@@ -681,7 +656,6 @@ mod mcp_integration {
         let sock = test_socket_path("allmcp");
         let logs = test_logs_dir("allmcp");
 
-        // MCP server: tools/list returns one tool, then tools/call returns result
         let tools_list = serde_json::json!({
             "jsonrpc": "2.0", "id": 1,
             "result": {"tools": [
@@ -701,8 +675,6 @@ mod mcp_integration {
             tool_allowlist: None,
         }];
 
-        // LLM call 1: returns MCP tool call
-        // LLM call 2: sees MCP result, returns end_turn
         let provider = MockProvider::new(vec![
             vec![
                 StreamEvent::ToolUseStart {
@@ -730,29 +702,25 @@ mod mcp_integration {
         let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Search for rust"}]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Search for rust"}]}]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
         let final_resp = find_final_response(&lines);
         let result = final_resp.result.unwrap();
         assert_eq!(result["stop_reason"], "end_turn");
-        assert_eq!(result["content"], "Found: rust");
+        assert_eq!(result["content"][0]["text"], "Found: rust");
 
-        // Verify the LLM saw both local and MCP tools
         let log = call_log.lock().unwrap();
         assert_eq!(log.len(), 2);
         let tool_names: Vec<&str> = log[0].tools.iter().map(|t| t.name.as_str()).collect();
         assert!(tool_names.contains(&"bash"), "should see local tool");
         assert!(tool_names.contains(&"mcp_search"), "should see MCP tool");
 
-        // Verify the MCP result was appended to conversation before second LLM call
         let second_call_msgs = &log[1].messages;
         let has_mcp_result = second_call_msgs.iter().any(|m| {
             m.role == "tool"
                 && m.tool_call_id.as_deref() == Some("tc-mcp-1")
-                && m.content
-                    .as_ref()
-                    .and_then(|v| v.as_str())
+                && tightbeam_protocol::content_text(&m.content)
                     .unwrap_or("")
                     .contains("search result: found it")
         });
@@ -793,8 +761,6 @@ mod mcp_integration {
             tool_allowlist: None,
         }];
 
-        // LLM call 1: returns both MCP and local tool calls
-        // LLM call 2: sees all results, returns end_turn
         let provider = MockProvider::new(vec![
             vec![
                 StreamEvent::ToolUseStart {
@@ -829,34 +795,27 @@ mod mcp_integration {
         let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
-        // Persistent connection for multi-turn
         let stream = UnixStream::connect(&sock).await.unwrap();
-        let (read_half, write_half) = stream.into_split();
-        let mut writer = write_half;
-        let mut reader = BufReader::new(read_half);
+        let (mut reader, mut writer) = stream.into_split();
 
-        // Turn 1: send user message with tools
-        let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Search and list"}]}}"#;
+        let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Search and list"}]}]}}"#;
         let lines1 = send_and_read_response(&mut writer, &mut reader, req1).await;
         let resp1 = find_final_response(&lines1);
         let result1 = resp1.result.unwrap();
         assert_eq!(result1["stop_reason"], "tool_use");
 
-        // Runtime should only see the local tool call
         let tool_calls = result1["tool_calls"].as_array().unwrap();
         assert_eq!(tool_calls.len(), 1, "should only see local tool call");
         assert_eq!(tool_calls[0]["name"], "bash");
         assert_eq!(tool_calls[0]["id"], "tc-local");
 
-        // Turn 2: send local tool result
-        let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-local","content":"file1.rs\nfile2.rs"}]}}"#;
+        let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-local","content":[{"type":"text","text":"file1.rs\nfile2.rs"}]}]}}"#;
         let lines2 = send_and_read_response(&mut writer, &mut reader, req2).await;
         let resp2 = find_final_response(&lines2);
         let result2 = resp2.result.unwrap();
         assert_eq!(result2["stop_reason"], "end_turn");
-        assert_eq!(result2["content"], "Done");
+        assert_eq!(result2["content"][0]["text"], "Done");
 
-        // Verify both MCP and local tool results were in the second LLM call
         let log = call_log.lock().unwrap();
         assert_eq!(log.len(), 2, "should have 2 LLM calls");
         let second_msgs = &log[1].messages;
@@ -911,7 +870,7 @@ mod mcp_integration {
         let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Hi"}]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}}"#;
         let lines = send_and_collect(&sock, request).await;
         let _ = find_final_response(&lines);
 
@@ -930,7 +889,6 @@ mod mcp_integration {
         let sock = test_socket_path("collision");
         let logs = test_logs_dir("collision");
 
-        // MCP server has a tool named "bash" which collides with local tool
         let tools_list = serde_json::json!({
             "jsonrpc": "2.0", "id": 1,
             "result": {"tools": [
@@ -958,14 +916,13 @@ mod mcp_integration {
         let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Local bash","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Hi"}]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Local bash","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}}"#;
         let lines = send_and_collect(&sock, request).await;
         let _ = find_final_response(&lines);
 
         let log = call_log.lock().unwrap();
         let tool_names: Vec<&str> = log[0].tools.iter().map(|t| t.name.as_str()).collect();
 
-        // "bash" should appear exactly once (the local one), "mcp_only" should appear
         assert_eq!(
             tool_names.iter().filter(|&&n| n == "bash").count(),
             1,
@@ -977,7 +934,6 @@ mod mcp_integration {
         );
         assert_eq!(tool_names.len(), 2, "should have 2 tools total");
 
-        // Verify the bash tool is the local one (description check)
         let bash_tool = log[0].tools.iter().find(|t| t.name == "bash").unwrap();
         assert_eq!(
             bash_tool.description, "Local bash",
@@ -993,10 +949,9 @@ mod mcp_integration {
         let sock = test_socket_path("mcpfail");
         let logs = test_logs_dir("mcpfail");
 
-        // Point MCP at a port with nothing listening
         let mcp_configs = vec![ResolvedMcp {
             name: "dead-server".into(),
-            url: "http://127.0.0.1:1".into(), // port 1 — nothing listening
+            url: "http://127.0.0.1:1".into(),
             auth_env: "TEST_TOKEN".into(),
             tool_allowlist: None,
         }];
@@ -1005,10 +960,9 @@ mod mcp_integration {
         let _handle = start_daemon_with_mcp(&sock, provider, logs.clone(), mcp_configs).await;
         tokio::time::sleep(WAIT).await;
 
-        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hi"}]}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        // Should get an error response, not a panic or hang
         assert!(!lines.is_empty(), "should get a response");
         let resp: AnyResponse = serde_json::from_str(&lines[lines.len() - 1]).unwrap();
         assert!(

@@ -1,12 +1,12 @@
 use serde::Deserialize;
 use std::path::Path;
+use tightbeam_protocol::framing::{read_frame, write_frame};
 use tightbeam_protocol::{HumanMessage, TurnRequest, TurnResponse};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
 pub(crate) struct DaemonConnection {
-    reader: BufReader<OwnedReadHalf>,
+    reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
     next_id: u64,
 }
@@ -33,7 +33,7 @@ impl DaemonConnection {
             .map_err(|e| format!("cannot connect to daemon at {}: {e}", path.display()))?;
         let (reader, writer) = stream.into_split();
         Ok(Self {
-            reader: BufReader::new(reader),
+            reader,
             writer,
             next_id: 1,
         })
@@ -50,42 +50,30 @@ impl DaemonConnection {
             "params": request
         });
 
-        let mut line = serde_json::to_string(&rpc).map_err(|e| format!("serialize error: {e}"))?;
-        line.push('\n');
-
-        self.writer
-            .write_all(line.as_bytes())
+        let payload = serde_json::to_vec(&rpc).map_err(|e| format!("serialize error: {e}"))?;
+        write_frame(&mut self.writer, &payload)
             .await
             .map_err(|e| format!("write error: {e}"))?;
-        self.writer
-            .flush()
-            .await
-            .map_err(|e| format!("flush error: {e}"))?;
 
         Ok(id)
+    }
+
+    async fn read_response(&mut self) -> Result<RpcResponse, String> {
+        let payload = match read_frame(&mut self.reader).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Err("daemon disconnected".into()),
+            Err(e) => return Err(format!("read error: {e}")),
+        };
+        let raw = String::from_utf8_lossy(&payload);
+        serde_json::from_str(&raw).map_err(|e| format!("invalid JSON from daemon: {e}"))
     }
 
     pub(crate) async fn read_turn_response(
         &mut self,
         expected_id: u64,
     ) -> Result<TurnResponse, String> {
-        let mut line_buf = String::new();
-
         loop {
-            line_buf.clear();
-            match self.reader.read_line(&mut line_buf).await {
-                Ok(0) => return Err("daemon disconnected".into()),
-                Ok(_) => {}
-                Err(e) => return Err(format!("read error: {e}")),
-            }
-
-            let trimmed = line_buf.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let resp: RpcResponse =
-                serde_json::from_str(trimmed).map_err(|e| format!("invalid response JSON: {e}"))?;
+            let resp = self.read_response().await?;
 
             // Streaming notification (no id) — skip
             if resp.method.is_some() && resp.id.is_none() {
@@ -114,23 +102,8 @@ impl DaemonConnection {
     }
 
     pub(crate) async fn wait_for_human_message(&mut self) -> Result<HumanMessage, String> {
-        let mut line_buf = String::new();
-
         loop {
-            line_buf.clear();
-            match self.reader.read_line(&mut line_buf).await {
-                Ok(0) => return Err("daemon disconnected".into()),
-                Ok(_) => {}
-                Err(e) => return Err(format!("read error: {e}")),
-            }
-
-            let trimmed = line_buf.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let resp: RpcResponse = serde_json::from_str(trimmed)
-                .map_err(|e| format!("invalid JSON from daemon: {e}"))?;
+            let resp = self.read_response().await?;
 
             if resp.method.as_deref() == Some("human_message") {
                 let params = resp.params.ok_or("human_message missing params")?;
@@ -145,7 +118,8 @@ impl DaemonConnection {
 #[cfg(test)]
 mod connection_tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use tightbeam_protocol::framing::{read_frame, write_frame};
+    use tokio::io::AsyncWriteExt;
 
     async fn mock_socket_pair(name: &str) -> (DaemonConnection, tokio::net::UnixStream) {
         let sock_dir =
@@ -166,16 +140,21 @@ mod connection_tests {
         (conn, daemon_stream)
     }
 
+    async fn write_json_frame(writer: &mut (impl AsyncWriteExt + Unpin), json: &str) {
+        write_frame(writer, json.as_bytes()).await.unwrap();
+    }
+
     #[tokio::test]
     async fn send_turn_serializes_correctly() {
-        let (mut conn, mut daemon) = mock_socket_pair("send").await;
+        let (mut conn, daemon) = mock_socket_pair("send").await;
+        let (mut daemon_reader, _) = daemon.into_split();
 
         let request = TurnRequest {
             system: Some("You are helpful.".into()),
             tools: None,
             messages: vec![tightbeam_protocol::Message {
                 role: "user".into(),
-                content: Some(serde_json::Value::String("Hello".into())),
+                content: Some(tightbeam_protocol::ContentBlock::text_content("Hello")),
                 tool_calls: None,
                 tool_call_id: None,
                 is_error: None,
@@ -185,15 +164,14 @@ mod connection_tests {
         let id = conn.send_turn(&request).await.unwrap();
         assert_eq!(id, 1);
 
-        let mut buf = vec![0u8; 4096];
-        let n = daemon.read(&mut buf).await.unwrap();
-        let received = String::from_utf8_lossy(&buf[..n]);
-        let parsed: serde_json::Value = serde_json::from_str(received.trim()).unwrap();
+        let frame = read_frame(&mut daemon_reader).await.unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&frame).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["id"], 1);
         assert_eq!(parsed["method"], "turn");
         assert_eq!(parsed["params"]["system"], "You are helpful.");
+        assert_eq!(parsed["params"]["messages"][0]["content"][0]["text"], "Hello");
     }
 
     #[tokio::test]
@@ -201,13 +179,11 @@ mod connection_tests {
         let (mut conn, daemon) = mock_socket_pair("notif").await;
         let (_, mut daemon_writer) = daemon.into_split();
 
-        // Notification has distinct text that must NOT appear in the returned response
         let notif = r#"{"jsonrpc":"2.0","method":"output","params":{"stream":"content","data":{"type":"text","text":"NOTIFICATION_TEXT"}}}"#;
-        let final_resp = r#"{"jsonrpc":"2.0","id":1,"result":{"stop_reason":"end_turn","content":"RESPONSE_TEXT"}}"#;
+        let final_resp = r#"{"jsonrpc":"2.0","id":1,"result":{"stop_reason":"end_turn","content":[{"type":"text","text":"RESPONSE_TEXT"}]}}"#;
 
-        let payload = format!("{notif}\n{final_resp}\n");
-        daemon_writer.write_all(payload.as_bytes()).await.unwrap();
-        daemon_writer.flush().await.unwrap();
+        write_json_frame(&mut daemon_writer, notif).await;
+        write_json_frame(&mut daemon_writer, final_resp).await;
 
         let response = conn.read_turn_response(1).await.unwrap();
         assert!(matches!(
@@ -215,7 +191,7 @@ mod connection_tests {
             tightbeam_protocol::StopReason::EndTurn
         ));
         assert_eq!(
-            response.content.as_deref(),
+            tightbeam_protocol::content_text(&response.content),
             Some("RESPONSE_TEXT"),
             "should return response content, not notification content"
         );
@@ -227,10 +203,7 @@ mod connection_tests {
         let (_, mut daemon_writer) = daemon.into_split();
 
         let resp = r#"{"jsonrpc":"2.0","id":1,"result":{"stop_reason":"tool_use","tool_calls":[{"id":"tc-1","name":"bash","input":{"command":"ls"}}]}}"#;
-        daemon_writer
-            .write_all(format!("{resp}\n").as_bytes())
-            .await
-            .unwrap();
+        write_json_frame(&mut daemon_writer, resp).await;
 
         let response = conn.read_turn_response(1).await.unwrap();
         assert!(matches!(
@@ -247,10 +220,7 @@ mod connection_tests {
         let (_, mut daemon_writer) = daemon.into_split();
 
         let resp = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"provider error"}}"#;
-        daemon_writer
-            .write_all(format!("{resp}\n").as_bytes())
-            .await
-            .unwrap();
+        write_json_frame(&mut daemon_writer, resp).await;
 
         let err = conn.read_turn_response(1).await.unwrap_err();
         assert!(err.contains("provider error"));
@@ -261,15 +231,14 @@ mod connection_tests {
         let (mut conn, daemon) = mock_socket_pair("human").await;
         let (_, mut daemon_writer) = daemon.into_split();
 
-        let msg =
-            r#"{"jsonrpc":"2.0","method":"human_message","params":{"content":"Fix the bug."}}"#;
-        daemon_writer
-            .write_all(format!("{msg}\n").as_bytes())
-            .await
-            .unwrap();
+        let msg = r#"{"jsonrpc":"2.0","method":"human_message","params":{"content":[{"type":"text","text":"Fix the bug."}]}}"#;
+        write_json_frame(&mut daemon_writer, msg).await;
 
         let human = conn.wait_for_human_message().await.unwrap();
-        assert_eq!(human.content, "Fix the bug.");
+        assert_eq!(
+            tightbeam_protocol::content_text(&Some(human.content)),
+            Some("Fix the bug.")
+        );
     }
 
     #[tokio::test]
@@ -303,11 +272,8 @@ mod connection_tests {
         let (_, mut daemon_writer) = daemon.into_split();
 
         let resp =
-            r#"{"jsonrpc":"2.0","id":99,"result":{"stop_reason":"end_turn","content":"wrong id"}}"#;
-        daemon_writer
-            .write_all(format!("{resp}\n").as_bytes())
-            .await
-            .unwrap();
+            r#"{"jsonrpc":"2.0","id":99,"result":{"stop_reason":"end_turn","content":[{"type":"text","text":"wrong id"}]}}"#;
+        write_json_frame(&mut daemon_writer, resp).await;
 
         let err = conn.read_turn_response(1).await.unwrap_err();
         assert!(
@@ -321,18 +287,17 @@ mod connection_tests {
         let (mut conn, daemon) = mock_socket_pair("skipnotif").await;
         let (_, mut daemon_writer) = daemon.into_split();
 
-        // Send an "output" notification first, then a human_message
         let output_notif = r#"{"jsonrpc":"2.0","method":"output","params":{"stream":"content","data":{"type":"text","text":"noise"}}}"#;
         let human_msg =
-            r#"{"jsonrpc":"2.0","method":"human_message","params":{"content":"Real message"}}"#;
+            r#"{"jsonrpc":"2.0","method":"human_message","params":{"content":[{"type":"text","text":"Real message"}]}}"#;
 
-        let payload = format!("{output_notif}\n{human_msg}\n");
-        daemon_writer.write_all(payload.as_bytes()).await.unwrap();
-        daemon_writer.flush().await.unwrap();
+        write_json_frame(&mut daemon_writer, output_notif).await;
+        write_json_frame(&mut daemon_writer, human_msg).await;
 
         let human = conn.wait_for_human_message().await.unwrap();
         assert_eq!(
-            human.content, "Real message",
+            tightbeam_protocol::content_text(&Some(human.content)),
+            Some("Real message"),
             "should skip output notification and return human_message"
         );
     }

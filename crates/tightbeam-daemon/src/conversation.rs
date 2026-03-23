@@ -1,4 +1,4 @@
-use crate::protocol::{Message, ToolDefinition};
+use crate::protocol::{ContentBlock, Message, ToolDefinition};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -10,7 +10,7 @@ struct LogEntry {
     ts: String,
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<serde_json::Value>,
+    content: Option<Vec<ContentBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<crate::protocol::ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,7 +153,7 @@ mod conversation_accumulation {
     fn text_msg(role: &str, text: &str) -> Message {
         Message {
             role: role.into(),
-            content: Some(serde_json::Value::String(text.into())),
+            content: Some(ContentBlock::text_content(text)),
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
@@ -231,7 +231,7 @@ mod conversation_accumulation {
 
         let msg = Message {
             role: "tool".into(),
-            content: Some(serde_json::Value::String("ls output".into())),
+            content: Some(ContentBlock::text_content("ls output")),
             tool_calls: None,
             tool_call_id: Some("tc-001".into()),
             is_error: None,
@@ -307,7 +307,7 @@ mod conversation_accumulation {
         let log_path = tmp.path().join("conversation.ndjson");
         std::fs::write(
             &log_path,
-            "{\"ts\":\"t\",\"role\":\"user\",\"content\":\"ok\"}\nnot json\n",
+            "{\"ts\":\"t\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}\nnot json\n",
         )
         .unwrap();
         assert!(

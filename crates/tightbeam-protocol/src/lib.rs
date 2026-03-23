@@ -1,9 +1,42 @@
+pub mod framing;
+
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+}
+
+impl ContentBlock {
+    pub fn text(s: impl Into<String>) -> Self {
+        Self::Text { text: s.into() }
+    }
+
+    pub fn text_content(s: impl Into<String>) -> Vec<ContentBlock> {
+        vec![Self::text(s)]
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text } => Some(text),
+        }
+    }
+}
+
+pub fn content_text(blocks: &Option<Vec<ContentBlock>>) -> Option<&str> {
+    blocks
+        .as_ref()
+        .and_then(|b| b.first())
+        .and_then(|b| b.as_text())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    pub content: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<Vec<ContentBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,7 +91,7 @@ pub struct TurnRequest {
 pub struct TurnResponse {
     pub stop_reason: StopReason,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Vec<ContentBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
@@ -79,7 +112,7 @@ pub struct StreamData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HumanMessage {
-    pub content: String,
+    pub content: Vec<ContentBlock>,
 }
 
 #[cfg(test)]
@@ -87,10 +120,32 @@ mod serialization {
     use super::*;
 
     #[test]
+    fn content_block_text_serializes() {
+        let block = ContentBlock::text("hello");
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(json, r#"{"type":"text","text":"hello"}"#);
+
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn content_text_helper() {
+        let blocks = Some(ContentBlock::text_content("hello"));
+        assert_eq!(content_text(&blocks), Some("hello"));
+
+        let none: Option<Vec<ContentBlock>> = None;
+        assert_eq!(content_text(&none), None);
+
+        let empty: Option<Vec<ContentBlock>> = Some(vec![]);
+        assert_eq!(content_text(&empty), None);
+    }
+
+    #[test]
     fn message_round_trips() {
         let msg = Message {
             role: "user".into(),
-            content: Some(serde_json::Value::String("hello".into())),
+            content: Some(ContentBlock::text_content("hello")),
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
@@ -98,9 +153,11 @@ mod serialization {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("tool_calls"));
         assert!(!json.contains("is_error"));
+        assert!(json.contains(r#""content":[{"type":"text","text":"hello"}]"#));
 
         let parsed: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.role, "user");
+        assert_eq!(content_text(&parsed.content), Some("hello"));
         assert!(parsed.tool_calls.is_none());
     }
 
@@ -127,7 +184,7 @@ mod serialization {
     fn tool_message_with_is_error() {
         let msg = Message {
             role: "tool".into(),
-            content: Some(serde_json::Value::String("file not found".into())),
+            content: Some(ContentBlock::text_content("file not found")),
             tool_calls: None,
             tool_call_id: Some("tc-1".into()),
             is_error: Some(true),
@@ -209,7 +266,7 @@ mod serialization {
             tools: None,
             messages: vec![Message {
                 role: "tool".into(),
-                content: Some(serde_json::Value::String("output".into())),
+                content: Some(ContentBlock::text_content("output")),
                 tool_calls: None,
                 tool_call_id: Some("tc-1".into()),
                 is_error: None,
@@ -232,7 +289,7 @@ mod serialization {
             }]),
             messages: vec![Message {
                 role: "user".into(),
-                content: Some(serde_json::Value::String("hi".into())),
+                content: Some(ContentBlock::text_content("hi")),
                 tool_calls: None,
                 tool_call_id: None,
                 is_error: None,
@@ -269,13 +326,13 @@ mod serialization {
     fn turn_response_end_turn_with_content() {
         let resp = TurnResponse {
             stop_reason: StopReason::EndTurn,
-            content: Some("The answer is 42.".into()),
+            content: Some(ContentBlock::text_content("The answer is 42.")),
             tool_calls: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: TurnResponse = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed.stop_reason, StopReason::EndTurn));
-        assert_eq!(parsed.content.as_deref(), Some("The answer is 42."));
+        assert_eq!(content_text(&parsed.content), Some("The answer is 42."));
         assert!(parsed.tool_calls.is_none());
     }
 
@@ -313,20 +370,33 @@ mod serialization {
     #[test]
     fn human_message_round_trips() {
         let msg = HumanMessage {
-            content: "Fix the login bug.".into(),
+            content: ContentBlock::text_content("Fix the login bug."),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: HumanMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.content, "Fix the login bug.");
+        assert_eq!(content_text(&Some(parsed.content)), Some("Fix the login bug."));
     }
 
     #[test]
-    fn backward_compat_message_without_is_error() {
-        let json = r#"{"role":"user","content":"hello"}"#;
-        let msg: Message = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.role, "user");
-        assert!(msg.is_error.is_none());
-        assert!(msg.tool_calls.is_none());
-        assert!(msg.tool_call_id.is_none());
+    fn message_none_content_omitted() {
+        let msg = Message {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("content"));
+    }
+
+    #[test]
+    fn plain_string_content_rejected() {
+        let json = r#"{"role":"user","content":"plain string"}"#;
+        let result: Result<Message, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "old-format plain string content must be rejected"
+        );
     }
 }

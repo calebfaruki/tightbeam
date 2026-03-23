@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 pub use tightbeam_protocol::{
-    Message, StopReason, StreamData, ToolCall, ToolDefinition, TurnRequest, TurnResponse,
+    ContentBlock, Message, StopReason, StreamData, ToolCall, ToolDefinition, TurnRequest,
+    TurnResponse,
 };
+pub use tightbeam_protocol::{content_text, framing};
 
 // --- Inbound requests (container → tightbeam) ---
 
@@ -42,7 +44,7 @@ pub struct FinalResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Vec<ContentBlock>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,7 +130,7 @@ pub fn build_final_response(
     id: u64,
     stop_reason: StopReason,
     tool_calls: Option<Vec<ToolCall>>,
-    content: Option<String>,
+    content: Option<Vec<ContentBlock>>,
 ) -> FinalResponse {
     FinalResponse {
         jsonrpc: "2.0",
@@ -141,19 +143,13 @@ pub fn build_final_response(
     }
 }
 
-pub fn send_line(line: &str) -> Vec<u8> {
-    let mut buf = line.as_bytes().to_vec();
-    buf.push(b'\n');
-    buf
-}
-
 #[cfg(test)]
 mod protocol_parsing {
     use super::*;
 
     #[test]
     fn valid_turn_parses() {
-        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":"Hello"}]}}"#;
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Hello"}]}]}}"#;
         let Ok(ValidatedRequest::Turn { id, params }) = validate_request(raw) else {
             panic!("expected Turn");
         };
@@ -166,7 +162,7 @@ mod protocol_parsing {
 
     #[test]
     fn turn_with_system_and_tools_parses() {
-        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","tools":[{"name":"bash","description":"Run a command","parameters":{"type":"object"}}],"messages":[{"role":"user","content":"Hi"}]}}"#;
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","tools":[{"name":"bash","description":"Run a command","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}}"#;
         let Ok(ValidatedRequest::Turn { id, params }) = validate_request(raw) else {
             panic!("expected Turn");
         };
@@ -178,7 +174,7 @@ mod protocol_parsing {
 
     #[test]
     fn turn_with_tool_results_parses() {
-        let raw = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-001","content":"output here"}]}}"#;
+        let raw = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-001","content":[{"type":"text","text":"output here"}]}]}}"#;
         let Ok(ValidatedRequest::Turn { id, params }) = validate_request(raw) else {
             panic!("expected Turn");
         };
@@ -186,7 +182,7 @@ mod protocol_parsing {
         assert_eq!(params.messages[0].role, "tool");
         assert_eq!(params.messages[0].tool_call_id.as_deref(), Some("tc-001"));
         assert_eq!(
-            params.messages[0].content.as_ref().and_then(|v| v.as_str()),
+            content_text(&params.messages[0].content),
             Some("output here")
         );
     }
@@ -278,7 +274,7 @@ mod protocol_parsing {
             1,
             StopReason::EndTurn,
             None,
-            Some("The answer is 42.".into()),
+            Some(ContentBlock::text_content("The answer is 42.")),
         );
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"id\":1"));
@@ -310,13 +306,5 @@ mod protocol_parsing {
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"code\":429"));
         assert!(json.contains("Rate limit exceeded"));
-    }
-
-    #[test]
-    fn send_line_appends_newline() {
-        let line = r#"{"jsonrpc":"2.0"}"#;
-        let result = send_line(line);
-        assert_eq!(result.last(), Some(&b'\n'));
-        assert_eq!(result.len(), line.len() + 1);
     }
 }
