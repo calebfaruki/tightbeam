@@ -12,8 +12,8 @@ use profile::AgentProfile;
 use protocol::{
     build_delivered_notification, build_disconnect_notification, build_end_turn_notification,
     build_error, build_final_response, build_human_message_notification, build_notification,
-    build_send_response, validate_request, ContentBlock, Message, SendParams, StopReason, StreamData,
-    ToolCall, ValidatedRequest,
+    build_send_response, validate_request, ContentBlock, Message, SendParams, StopReason,
+    StreamData, ToolCall, ValidatedRequest,
 };
 use provider::{collect_text, collect_tool_calls, LlmProvider, ProviderConfig, StreamEvent};
 

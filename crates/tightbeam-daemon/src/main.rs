@@ -298,7 +298,9 @@ async fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: tightbeam-daemon <start|restart|stop|init|status|show|logs|send|version>");
+            eprintln!(
+                "usage: tightbeam-daemon <start|restart|stop|init|status|show|logs|send|version>"
+            );
             std::process::exit(1);
         }
     }

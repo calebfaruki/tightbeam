@@ -190,7 +190,6 @@ pub fn load_all(config_dir: &Path) -> Result<(Registry, HashMap<String, AgentPro
     Ok((registry, profiles))
 }
 
-
 #[cfg(test)]
 mod registry_tests {
     use super::*;
