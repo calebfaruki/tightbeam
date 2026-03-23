@@ -530,7 +530,7 @@ async fn handle_runtime_connection(
         .get(&profile.llm.provider)
         .ok_or_else(|| format!("unknown provider: {}", profile.llm.provider))?;
 
-    let api_key = std::env::var(&profile.llm.api_key_env).unwrap_or_default();
+    let api_key = profile.llm.api_key.clone();
     let config = ProviderConfig {
         model: profile.llm.model.clone(),
         api_key,

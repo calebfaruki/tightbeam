@@ -87,7 +87,7 @@ fn make_profile() -> AgentProfile {
         llm: ResolvedLlm {
             provider: "mock".into(),
             model: "test-model".into(),
-            api_key_env: "TIGHTBEAM_TEST_KEY".into(),
+            api_key: "test-key".into(),
             max_tokens: 1024,
         },
         mcp_servers: Vec::new(),
@@ -683,7 +683,7 @@ mod mcp_integration {
         let mcp_configs = vec![ResolvedMcp {
             name: "search".into(),
             url: mcp_url,
-            auth_env: "TEST_TOKEN".into(),
+            auth_token: "test-token".into(),
             tool_allowlist: None,
         }];
 
@@ -769,7 +769,7 @@ mod mcp_integration {
         let mcp_configs = vec![ResolvedMcp {
             name: "search".into(),
             url: mcp_url,
-            auth_env: "TEST_TOKEN".into(),
+            auth_token: "test-token".into(),
             tool_allowlist: None,
         }];
 
@@ -868,7 +868,7 @@ mod mcp_integration {
         let mcp_configs = vec![ResolvedMcp {
             name: "server".into(),
             url: mcp_url,
-            auth_env: "TEST_TOKEN".into(),
+            auth_token: "test-token".into(),
             tool_allowlist: None,
         }];
 
@@ -914,7 +914,7 @@ mod mcp_integration {
         let mcp_configs = vec![ResolvedMcp {
             name: "server".into(),
             url: mcp_url,
-            auth_env: "TEST_TOKEN".into(),
+            auth_token: "test-token".into(),
             tool_allowlist: None,
         }];
 
@@ -965,7 +965,7 @@ mod mcp_integration {
         let mcp_configs = vec![ResolvedMcp {
             name: "dead-server".into(),
             url: "http://127.0.0.1:1".into(),
-            auth_env: "TEST_TOKEN".into(),
+            auth_token: "test-token".into(),
             tool_allowlist: None,
         }];
 

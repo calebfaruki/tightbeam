@@ -256,7 +256,7 @@ impl McpManager {
         let servers = configs
             .into_iter()
             .map(|c| {
-                let auth_token = std::env::var(&c.auth_env).unwrap_or_default();
+                let auth_token = c.auth_token.clone();
                 McpServerState {
                     name: c.name,
                     connection: McpConnection::new(c.url, auth_token),
@@ -546,7 +546,7 @@ mod tests {
         let configs = vec![ResolvedMcp {
             name: "test-server".into(),
             url,
-            auth_env: "TEST_TOKEN".into(),
+            auth_token: "test-token".into(),
             tool_allowlist: None,
         }];
 
@@ -582,7 +582,7 @@ mod tests {
         let configs = vec![ResolvedMcp {
             name: "server".into(),
             url,
-            auth_env: "TEST_TOKEN".into(),
+            auth_token: "test-token".into(),
             tool_allowlist: None,
         }];
 

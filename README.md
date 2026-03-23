@@ -77,15 +77,13 @@ The registry defines LLM providers and MCP servers available to all agents. Crea
 [llm.claude-sonnet]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key = "sk-ant-..."
 max_tokens = 8192
 
 [mcp.github]
 url = "https://mcp.github.com/sse"
-auth_env = "GITHUB_TOKEN"
+auth_token = "ghp_..."
 ```
-
-The `api_key_env` and `auth_env` fields name host environment variables — values never appear in config.
 
 ### Create an Agent Profile
 
@@ -322,16 +320,16 @@ Subscribers receive text output only. Tool use events are internal to the runtim
 [llm.claude-sonnet]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key = "sk-ant-..."
 max_tokens = 8192                    # optional, defaults to 8192
 
 [mcp.github]
 url = "https://mcp.github.com/sse"
-auth_env = "GITHUB_TOKEN"
+auth_token = "ghp_..."
 
 [mcp.web-search]
 url = "https://mcp.search.example.com/sse"
-auth_env = "SEARCH_API_KEY"
+auth_token = "sk-search-..."
 ```
 
 ### Agent Profile
@@ -343,7 +341,7 @@ auth_env = "SEARCH_API_KEY"
 # Empty body = all registry defaults.
 # Fields present override the registry value for that field only.
 # Example: override just the API key:
-# api_key_env = "AGENT_SPECIFIC_KEY"
+# api_key = "sk-ant-agent-specific-..."
 
 [mcp.github]
 tools = ["create_pull_request", "list_issues"]

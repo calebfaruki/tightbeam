@@ -16,14 +16,14 @@ pub struct Registry {
 pub struct RegistryLlm {
     pub provider: String,
     pub model: String,
-    pub api_key_env: String,
+    pub api_key: String,
     pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegistryMcp {
     pub url: String,
-    pub auth_env: String,
+    pub auth_token: String,
 }
 
 impl Registry {
@@ -57,7 +57,7 @@ pub struct AgentProfile {
 pub struct ResolvedLlm {
     pub provider: String,
     pub model: String,
-    pub api_key_env: String,
+    pub api_key: String,
     pub max_tokens: u32,
 }
 
@@ -65,7 +65,7 @@ pub struct ResolvedLlm {
 pub struct ResolvedMcp {
     pub name: String,
     pub url: String,
-    pub auth_env: String,
+    pub auth_token: String,
     pub tool_allowlist: Option<Vec<String>>,
 }
 
@@ -87,14 +87,14 @@ struct RawAgentProfile {
 struct RawLlmOverride {
     provider: Option<String>,
     model: Option<String>,
-    api_key_env: Option<String>,
+    api_key: Option<String>,
     max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawMcpOverride {
     url: Option<String>,
-    auth_env: Option<String>,
+    auth_token: Option<String>,
     tools: Option<Vec<String>>,
 }
 
@@ -126,9 +126,9 @@ impl AgentProfile {
             model: llm_override
                 .model
                 .unwrap_or_else(|| registry_llm.model.clone()),
-            api_key_env: llm_override
-                .api_key_env
-                .unwrap_or_else(|| registry_llm.api_key_env.clone()),
+            api_key: llm_override
+                .api_key
+                .unwrap_or_else(|| registry_llm.api_key.clone()),
             max_tokens: llm_override
                 .max_tokens
                 .or(registry_llm.max_tokens)
@@ -145,9 +145,9 @@ impl AgentProfile {
             mcp_servers.push(ResolvedMcp {
                 name: mcp_key,
                 url: mcp_override.url.unwrap_or_else(|| registry_mcp.url.clone()),
-                auth_env: mcp_override
-                    .auth_env
-                    .unwrap_or_else(|| registry_mcp.auth_env.clone()),
+                auth_token: mcp_override
+                    .auth_token
+                    .unwrap_or_else(|| registry_mcp.auth_token.clone()),
                 tool_allowlist: mcp_override.tools,
             });
         }
@@ -172,29 +172,29 @@ mod registry_tests {
 [llm.claude-sonnet]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key = "ANTHROPIC_API_KEY"
 max_tokens = 8192
 
 [llm.gpt-4o]
 provider = "openai"
 model = "gpt-4o"
-api_key_env = "OPENAI_API_KEY"
+api_key = "OPENAI_API_KEY"
 
 [mcp.github]
 url = "https://mcp.github.com/sse"
-auth_env = "GITHUB_TOKEN"
+auth_token = "GITHUB_TOKEN"
 
 [mcp.web-search]
 url = "https://mcp.search.example.com/sse"
-auth_env = "SEARCH_API_KEY"
+auth_token = "SEARCH_API_KEY"
 "#;
         let reg = Registry::parse(toml).unwrap();
         assert_eq!(reg.llm.len(), 2);
         assert_eq!(reg.mcp.len(), 2);
         assert_eq!(reg.llm["claude-sonnet"].provider, "anthropic");
-        assert_eq!(reg.llm["gpt-4o"].api_key_env, "OPENAI_API_KEY");
+        assert_eq!(reg.llm["gpt-4o"].api_key, "OPENAI_API_KEY");
         assert_eq!(reg.mcp["github"].url, "https://mcp.github.com/sse");
-        assert_eq!(reg.mcp["web-search"].auth_env, "SEARCH_API_KEY");
+        assert_eq!(reg.mcp["web-search"].auth_token, "SEARCH_API_KEY");
     }
 
     #[test]
@@ -202,7 +202,7 @@ auth_env = "SEARCH_API_KEY"
         let toml = r#"
 [llm.claude-sonnet]
 provider = "anthropic"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key = "ANTHROPIC_API_KEY"
 "#;
         let err = Registry::parse(toml).unwrap_err();
         assert!(err.contains("model"), "expected error about model: {err}");
@@ -214,7 +214,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 [llm.claude-sonnet]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key = "ANTHROPIC_API_KEY"
 "#;
         let reg = Registry::parse(toml).unwrap();
         assert_eq!(reg.llm.len(), 1);
@@ -234,7 +234,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 [llm.claude-sonnet]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key = "ANTHROPIC_API_KEY"
 "#;
         let reg = Registry::parse(toml).unwrap();
         assert!(reg.llm["claude-sonnet"].max_tokens.is_none());
@@ -251,16 +251,16 @@ mod profile_resolution {
 [llm.claude-sonnet]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key = "ANTHROPIC_API_KEY"
 max_tokens = 4096
 
 [mcp.github]
 url = "https://mcp.github.com/sse"
-auth_env = "GITHUB_TOKEN"
+auth_token = "GITHUB_TOKEN"
 
 [mcp.web-search]
 url = "https://mcp.search.example.com/sse"
-auth_env = "SEARCH_API_KEY"
+auth_token = "SEARCH_API_KEY"
 "#,
         )
         .unwrap()
@@ -272,7 +272,7 @@ auth_env = "SEARCH_API_KEY"
         let profile = AgentProfile::resolve("[llm.claude-sonnet]\n", &reg).unwrap();
         assert_eq!(profile.llm.provider, "anthropic");
         assert_eq!(profile.llm.model, "claude-sonnet-4-20250514");
-        assert_eq!(profile.llm.api_key_env, "ANTHROPIC_API_KEY");
+        assert_eq!(profile.llm.api_key, "ANTHROPIC_API_KEY");
         assert_eq!(profile.llm.max_tokens, 4096);
     }
 
@@ -281,12 +281,12 @@ auth_env = "SEARCH_API_KEY"
         let reg = test_registry();
         let toml = r#"
 [llm.claude-sonnet]
-api_key_env = "AGENT_SPECIFIC_KEY"
+api_key = "AGENT_SPECIFIC_KEY"
 "#;
         let profile = AgentProfile::resolve(toml, &reg).unwrap();
         assert_eq!(profile.llm.provider, "anthropic");
         assert_eq!(profile.llm.model, "claude-sonnet-4-20250514");
-        assert_eq!(profile.llm.api_key_env, "AGENT_SPECIFIC_KEY");
+        assert_eq!(profile.llm.api_key, "AGENT_SPECIFIC_KEY");
         assert_eq!(profile.llm.max_tokens, 4096);
     }
 
@@ -297,13 +297,13 @@ api_key_env = "AGENT_SPECIFIC_KEY"
 [llm.claude-sonnet]
 provider = "custom"
 model = "custom-model"
-api_key_env = "CUSTOM_KEY"
+api_key = "CUSTOM_KEY"
 max_tokens = 2048
 "#;
         let profile = AgentProfile::resolve(toml, &reg).unwrap();
         assert_eq!(profile.llm.provider, "custom");
         assert_eq!(profile.llm.model, "custom-model");
-        assert_eq!(profile.llm.api_key_env, "CUSTOM_KEY");
+        assert_eq!(profile.llm.api_key, "CUSTOM_KEY");
         assert_eq!(profile.llm.max_tokens, 2048);
     }
 
@@ -314,7 +314,7 @@ max_tokens = 2048
 [llm.bare]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "KEY"
+api_key = "KEY"
 "#,
         )
         .unwrap();
@@ -337,7 +337,7 @@ api_key_env = "KEY"
             RegistryLlm {
                 provider: "openai".into(),
                 model: "gpt-4o".into(),
-                api_key_env: "OPENAI_KEY".into(),
+                api_key: "OPENAI_KEY".into(),
                 max_tokens: None,
             },
         );
@@ -408,11 +408,11 @@ tools = ["create_pull_request", "list_issues"]
         let toml = r#"
 [llm.claude-sonnet]
 [mcp.github]
-auth_env = "AGENT_GITHUB_TOKEN"
+auth_token = "AGENT_GITHUB_TOKEN"
 "#;
         let profile = AgentProfile::resolve(toml, &reg).unwrap();
         assert_eq!(profile.mcp_servers[0].url, "https://mcp.github.com/sse");
-        assert_eq!(profile.mcp_servers[0].auth_env, "AGENT_GITHUB_TOKEN");
+        assert_eq!(profile.mcp_servers[0].auth_token, "AGENT_GITHUB_TOKEN");
     }
 
     #[test]
