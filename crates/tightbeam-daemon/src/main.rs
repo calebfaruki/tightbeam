@@ -53,40 +53,41 @@ fn remove_pid_file() {
 }
 
 fn restart_command() {
-    let path = pid_path();
-    let pid_str = match std::fs::read_to_string(&path) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => {
-            eprintln!("tightbeam: no pid file found — is the daemon running?");
-            std::process::exit(1);
+    // Try SIGHUP if daemon is running
+    if let Ok(pid_str) = std::fs::read_to_string(pid_path()) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            if unsafe { libc::kill(pid, 0) } == 0 {
+                if unsafe { libc::kill(pid, libc::SIGHUP) } == 0 {
+                    println!("tightbeam: config reload triggered (pid {pid})");
+                    return;
+                }
+            }
+            let _ = std::fs::remove_file(pid_path());
         }
-    };
-
-    let pid: i32 = match pid_str.parse() {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("tightbeam: invalid pid file");
-            let _ = std::fs::remove_file(&path);
-            std::process::exit(1);
-        }
-    };
-
-    // Check if process is alive
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
-    if !alive {
-        eprintln!("tightbeam: stale pid file (process {pid} not running)");
-        let _ = std::fs::remove_file(&path);
-        std::process::exit(1);
     }
 
-    // Send SIGHUP
-    let result = unsafe { libc::kill(pid, libc::SIGHUP) };
-    if result != 0 {
-        eprintln!("tightbeam: failed to send SIGHUP to process {pid}");
+    // Daemon not running — start via service manager
+    let started = if cfg!(target_os = "macos") {
+        let uid = unsafe { libc::getuid() };
+        std::process::Command::new("launchctl")
+            .args(["kickstart", "-k", &format!("gui/{uid}/dev.tightbeam.daemon")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        std::process::Command::new("systemctl")
+            .args(["--user", "restart", "tightbeam"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+
+    if started {
+        println!("tightbeam: daemon started");
+    } else {
+        eprintln!("tightbeam: failed to start daemon — run 'tightbeam-daemon init' first");
         std::process::exit(1);
     }
-
-    println!("tightbeam: config reload triggered (pid {pid})");
 }
 
 fn show_command(args: &[String]) {
