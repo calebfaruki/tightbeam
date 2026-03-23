@@ -70,7 +70,11 @@ fn restart_command() {
     let started = if cfg!(target_os = "macos") {
         let uid = unsafe { libc::getuid() };
         std::process::Command::new("launchctl")
-            .args(["kickstart", "-k", &format!("gui/{uid}/dev.tightbeam.daemon")])
+            .args([
+                "kickstart",
+                "-k",
+                &format!("gui/{uid}/dev.tightbeam.daemon"),
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
