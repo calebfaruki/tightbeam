@@ -12,8 +12,8 @@ use profile::AgentProfile;
 use protocol::{
     build_delivered_notification, build_disconnect_notification, build_end_turn_notification,
     build_error, build_final_response, build_human_message_notification, build_notification,
-    build_send_response, validate_request, ContentBlock, Message, SendParams, StopReason, ToolCall,
-    ValidatedRequest,
+    build_send_response, validate_request, ContentBlock, Message, SendParams, StopReason, StreamData,
+    ToolCall, ValidatedRequest,
 };
 use provider::{collect_text, collect_tool_calls, LlmProvider, ProviderConfig, StreamEvent};
 
@@ -28,7 +28,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock};
 
-pub type ProfileMap = Arc<HashMap<String, AgentProfile>>;
+pub type ProfileMap = Arc<RwLock<HashMap<String, AgentProfile>>>;
 pub type ConversationMap = Arc<RwLock<HashMap<String, ConversationLog>>>;
 pub type ProviderMap = Arc<HashMap<String, Box<dyn LlmProvider>>>;
 pub type McpManagerMap = Arc<RwLock<HashMap<String, McpManager>>>;
@@ -157,6 +157,21 @@ async fn call_llm(
     let stop_reason = StopReason::from_str_lossy(&stop_reason_str);
     let tool_calls = collect_tool_calls(&events);
     let content = collect_text(&events).map(ContentBlock::text_content);
+
+    if content.is_some() {
+        let newline = build_notification(
+            "content",
+            StreamData {
+                data_type: "text".into(),
+                text: Some("\n".into()),
+                id: None,
+                name: None,
+                input: None,
+            },
+        );
+        let newline_value = serde_json::to_value(&newline).unwrap();
+        broadcast_to_subscribers(subscribers, &newline_value).await;
+    }
 
     let assistant_msg = Message {
         role: "assistant".into(),
@@ -522,20 +537,16 @@ async fn handle_runtime_connection(
     human_msg_senders: HumanMessageSenderMap,
     logs_base_dir: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let profile = profiles
-        .get(&profile_name)
-        .expect("profile must exist in map");
-
-    let provider = providers
-        .get(&profile.llm.provider)
-        .ok_or_else(|| format!("unknown provider: {}", profile.llm.provider))?;
-
-    let api_key = profile.llm.api_key.clone();
-    let config = ProviderConfig {
-        model: profile.llm.model.clone(),
-        api_key,
-        max_tokens: profile.llm.max_tokens,
-    };
+    {
+        let profs = profiles.read().await;
+        let profile = profs
+            .get(&profile_name)
+            .ok_or_else(|| format!("unknown agent: {profile_name}"))?;
+        let mut mcp_mgrs = mcp_managers.write().await;
+        mcp_mgrs
+            .entry(profile_name.clone())
+            .or_insert_with(|| McpManager::new(profile.mcp_servers.clone()));
+    }
 
     let mut convos = conversations.write().await;
     let conversation = convos
@@ -544,8 +555,8 @@ async fn handle_runtime_connection(
 
     let mut mcp_mgrs = mcp_managers.write().await;
     let mcp_manager = mcp_mgrs
-        .entry(profile_name.clone())
-        .or_insert_with(|| McpManager::new(profile.mcp_servers.clone()));
+        .get_mut(&profile_name)
+        .expect("mcp manager must exist");
 
     let (tx, mut rx) = mpsc::channel::<HumanMessageDelivery>(32);
     human_msg_senders
@@ -563,6 +574,20 @@ async fn handle_runtime_connection(
                         let raw = String::from_utf8_lossy(&bytes);
                         match validate_request(&raw) {
                             Ok(ValidatedRequest::Turn { id, params }) => {
+                                let profs = profiles.read().await;
+                                let profile = profs
+                                    .get(&profile_name)
+                                    .expect("profile must exist in map");
+                                let config = ProviderConfig {
+                                    model: profile.llm.model.clone(),
+                                    api_key: profile.llm.api_key.clone(),
+                                    max_tokens: profile.llm.max_tokens,
+                                };
+                                let provider = providers
+                                    .get(&profile.llm.provider)
+                                    .ok_or_else(|| format!("unknown provider: {}", profile.llm.provider))?;
+                                drop(profs);
+
                                 let subs = get_subscribers(&agent_state).await;
                                 let mut ctx = TurnContext {
                                     conversation,
@@ -707,6 +732,7 @@ pub async fn run_daemon(
     providers: ProviderMap,
     mcp_managers: McpManagerMap,
     logs_base_dir: PathBuf,
+    config_dir: PathBuf,
 ) {
     let human_msg_senders: HumanMessageSenderMap = Arc::new(RwLock::new(HashMap::new()));
 
@@ -756,7 +782,23 @@ pub async fn run_daemon(
         });
     }
 
-    std::future::pending::<()>().await;
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("failed to register SIGHUP handler");
+
+    loop {
+        sighup.recv().await;
+        match profile::load_all(&config_dir) {
+            Ok((_registry, new_profiles)) => {
+                let count = new_profiles.len();
+                let mut profs = profiles.write().await;
+                *profs = new_profiles;
+                tracing::info!("config reloaded ({count} profiles)");
+            }
+            Err(e) => {
+                tracing::error!("config reload failed: {e}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

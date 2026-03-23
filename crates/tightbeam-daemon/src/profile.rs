@@ -162,6 +162,35 @@ impl AgentProfile {
     }
 }
 
+pub fn load_all(config_dir: &Path) -> Result<(Registry, HashMap<String, AgentProfile>), String> {
+    let registry_path = config_dir.join("registry.toml");
+    let registry = if registry_path.exists() {
+        Registry::load(&registry_path)?
+    } else {
+        Registry::empty()
+    };
+
+    let agent_dir = config_dir.join("agents");
+    let mut profiles = HashMap::new();
+    if agent_dir.exists() {
+        for entry in std::fs::read_dir(&agent_dir).map_err(|e| format!("{e}"))? {
+            let entry = entry.map_err(|e| format!("{e}"))?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let name = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let profile = AgentProfile::load(&path, &registry)?;
+            profiles.insert(name, profile);
+        }
+    }
+    Ok((registry, profiles))
+}
+
+
 #[cfg(test)]
 mod registry_tests {
     use super::*;

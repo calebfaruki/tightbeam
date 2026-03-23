@@ -101,7 +101,7 @@ async fn start_daemon(
 ) -> tokio::task::JoinHandle<()> {
     let mut profiles = HashMap::new();
     profiles.insert("test-agent".to_string(), make_profile());
-    let profiles: ProfileMap = Arc::new(profiles);
+    let profiles: ProfileMap = Arc::new(RwLock::new(profiles));
 
     let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
 
@@ -114,6 +114,8 @@ async fn start_daemon(
     let listener = bind_agent_socket(sock_path).unwrap();
     let listeners = vec![("test-agent".to_string(), listener)];
 
+    let config_dir = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
+
     tokio::spawn(async move {
         run_daemon(
             listeners,
@@ -122,6 +124,7 @@ async fn start_daemon(
             providers,
             mcp_managers,
             logs_dir,
+            config_dir,
         )
         .await;
     })
@@ -608,7 +611,7 @@ mod mcp_integration {
     ) -> tokio::task::JoinHandle<()> {
         let mut profiles = HashMap::new();
         profiles.insert("test-agent".to_string(), make_profile());
-        let profiles: ProfileMap = Arc::new(profiles);
+        let profiles: ProfileMap = Arc::new(RwLock::new(profiles));
 
         let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
 
@@ -623,6 +626,8 @@ mod mcp_integration {
         let listener = bind_agent_socket(sock_path).unwrap();
         let listeners = vec![("test-agent".to_string(), listener)];
 
+        let config_dir = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
+
         tokio::spawn(async move {
             run_daemon(
                 listeners,
@@ -631,6 +636,7 @@ mod mcp_integration {
                 providers,
                 mcp_managers,
                 logs_dir,
+                config_dir,
             )
             .await;
         })
@@ -1363,6 +1369,15 @@ mod send_integration {
         assert!(
             tool_notifs.is_empty(),
             "subscriber should NOT receive tool_use events, got: {tool_notifs:?}"
+        );
+
+        let all_text: String = text_notifs
+            .iter()
+            .filter_map(|f| f["params"]["data"]["text"].as_str())
+            .collect();
+        assert!(
+            all_text.contains("Let me run that\n"),
+            "subscriber output should have newline after first turn text, got: {all_text:?}"
         );
 
         let _ = std::fs::remove_dir_all(&logs);

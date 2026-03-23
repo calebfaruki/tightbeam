@@ -1,4 +1,4 @@
-use tightbeam_daemon::profile::{AgentProfile, Registry};
+use tightbeam_daemon::profile;
 use tightbeam_daemon::provider::claude::ClaudeProvider;
 use tightbeam_daemon::provider::LlmProvider;
 use tightbeam_daemon::{
@@ -10,6 +10,8 @@ use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+extern crate libc;
 use tightbeam_protocol::framing::{read_frame, write_frame};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
@@ -33,6 +35,58 @@ fn logs_dir() -> PathBuf {
     PathBuf::from(home)
         .join(".local/share/tightbeam")
         .join("logs")
+}
+
+fn pid_path() -> PathBuf {
+    config_dir().join("tightbeam.pid")
+}
+
+fn write_pid_file() {
+    let pid = std::process::id();
+    if let Err(e) = std::fs::write(pid_path(), pid.to_string()) {
+        tracing::warn!("failed to write pid file: {e}");
+    }
+}
+
+fn remove_pid_file() {
+    let _ = std::fs::remove_file(pid_path());
+}
+
+fn restart_command() {
+    let path = pid_path();
+    let pid_str = match std::fs::read_to_string(&path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            eprintln!("tightbeam: no pid file found — is the daemon running?");
+            std::process::exit(1);
+        }
+    };
+
+    let pid: i32 = match pid_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("tightbeam: invalid pid file");
+            let _ = std::fs::remove_file(&path);
+            std::process::exit(1);
+        }
+    };
+
+    // Check if process is alive
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    if !alive {
+        eprintln!("tightbeam: stale pid file (process {pid} not running)");
+        let _ = std::fs::remove_file(&path);
+        std::process::exit(1);
+    }
+
+    // Send SIGHUP
+    let result = unsafe { libc::kill(pid, libc::SIGHUP) };
+    if result != 0 {
+        eprintln!("tightbeam: failed to send SIGHUP to process {pid}");
+        std::process::exit(1);
+    }
+
+    println!("tightbeam: config reload triggered (pid {pid})");
 }
 
 fn show_command(args: &[String]) {
@@ -224,6 +278,10 @@ async fn main() {
             logs_command(&args[2..]);
             return;
         }
+        "restart" => {
+            restart_command();
+            return;
+        }
         "stop" => {
             let config = tightbeam_daemon::init::InitConfig::detect();
             tightbeam_daemon::init::run_uninstall(&config).unwrap_or_else(|e| {
@@ -240,7 +298,7 @@ async fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: tightbeam-daemon <start|stop|init|status|show|logs|send|version>");
+            eprintln!("usage: tightbeam-daemon <start|restart|stop|init|status|show|logs|send|version>");
             std::process::exit(1);
         }
     }
@@ -251,50 +309,16 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
-    let registry_path = config_dir().join("registry.toml");
-    let registry = if registry_path.exists() {
-        Registry::load(&registry_path).unwrap_or_else(|e| {
-            eprintln!("tightbeam: {e}");
-            std::process::exit(1);
-        })
-    } else {
-        Registry::empty()
-    };
-
-    let agent_dir = agents_dir();
-    let mut profile_map: HashMap<String, AgentProfile> = HashMap::new();
-
-    if agent_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&agent_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                    continue;
-                }
-                let name = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(n) => n.to_string(),
-                    None => continue,
-                };
-                match AgentProfile::load(&path, &registry) {
-                    Ok(profile) => {
-                        profile_map.insert(name, profile);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "tightbeam: failed to load profile '{}': {e}",
-                            path.display()
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
-    }
+    let cfg_dir = config_dir();
+    let (_registry, profile_map) = profile::load_all(&cfg_dir).unwrap_or_else(|e| {
+        eprintln!("tightbeam: {e}");
+        std::process::exit(1);
+    });
 
     if profile_map.is_empty() {
         eprintln!(
             "tightbeam: no agent profiles found in {} — create at least one to start",
-            agent_dir.display()
+            agents_dir().display()
         );
         std::process::exit(1);
     }
@@ -340,10 +364,12 @@ async fn main() {
     let mut provider_map: HashMap<String, Box<dyn LlmProvider>> = HashMap::new();
     provider_map.insert("anthropic".into(), Box::new(ClaudeProvider::new()));
 
-    let profiles: ProfileMap = Arc::new(profile_map);
+    let profiles: ProfileMap = Arc::new(RwLock::new(profile_map));
     let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
     let providers: ProviderMap = Arc::new(provider_map);
     let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
+
+    write_pid_file();
 
     // Rebuild conversations from existing logs
     let log_base = logs_dir();
@@ -375,6 +401,9 @@ async fn main() {
         providers,
         mcp_managers,
         log_base,
+        cfg_dir,
     )
     .await;
+
+    remove_pid_file();
 }

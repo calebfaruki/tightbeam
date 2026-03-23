@@ -1,6 +1,13 @@
 #!/bin/sh
 set -e
 
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+  esac
+done
+
 # Configurable
 INSTALL_DIR="${TIGHTBEAM_INSTALL_DIR:-$HOME/.local/bin}"
 REPO="calebfaruki/tightbeam"
@@ -54,12 +61,16 @@ case "$OS_NAME" in
 esac
 
 # Verify
-if ! "$INSTALL_DIR/tightbeam-daemon" version >/dev/null 2>&1; then
+if [ "$FORCE" = "0" ] && ! "$INSTALL_DIR/tightbeam-daemon" version >/dev/null 2>&1; then
     echo "tightbeam: download failed or binary is incompatible"
     exit 1
 fi
 
-echo "tightbeam: installed to $INSTALL_DIR/tightbeam-daemon"
+if [ "$FORCE" = "1" ]; then
+    echo "tightbeam: force-installed to $INSTALL_DIR/tightbeam-daemon"
+else
+    echo "tightbeam: installed to $INSTALL_DIR/tightbeam-daemon"
+fi
 
 # Check PATH
 case ":$PATH:" in
