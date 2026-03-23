@@ -79,11 +79,11 @@ docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
         <div class="border border-white/10 bg-zinc-900 px-5 py-4">
           <div class="text-gray-300 font-medium mb-3">Container</div>
           <div class="text-gray-500 space-y-1">
-            <div>agent sends <span class="text-gray-400">llm_call</span></div>
+            <div>runtime sends <span class="text-gray-400">turn</span></div>
             <div class="text-gray-600 pl-4">&darr;</div>
-            <div>tightbeam writes to socket</div>
+            <div>executes tools locally</div>
             <div class="text-gray-600 pl-4">&darr;</div>
-            <div>streams response to stdout</div>
+            <div>sends results in next turn</div>
           </div>
         </div>
         <div class="border border-white/10 sm:border-l-0 bg-zinc-900 px-5 py-4">
@@ -139,22 +139,22 @@ docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
       <h2 class="border-b border-white/20 text-lg font-medium mb-6">One connection, one session</h2>
 
       <p class="text-sm text-gray-400 mb-8 leading-relaxed">
-        The shim connects once. The entire tool loop &mdash; <code class="text-gray-300">llm_call</code>, tool execution, <code class="text-gray-300">tool_result</code>, next <code class="text-gray-300">llm_call</code> &mdash; runs on a single persistent socket connection until the session ends.
+        The runtime connects once. The entire tool loop &mdash; <code class="text-gray-300">turn</code>, tool execution, results in the next <code class="text-gray-300">turn</code> &mdash; runs on a single persistent socket connection until the session ends.
       </p>
 
-      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Agent sends llm_call</span>
-{"jsonrpc":"2.0","id":1,"method":"llm_call","params":{"messages":[...],"tools":[...]}}
+      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Runtime sends turn</span>
+{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[...],"tools":[...]}}
 
-<span class="text-gray-600"># Tightbeam streams response</span>
+<span class="text-gray-600"># Daemon streams response</span>
 {"jsonrpc":"2.0","method":"output","params":{"stream":"content","data":{"type":"text","text":"I'll run ls"}}}
 {"jsonrpc":"2.0","id":1,"result":{"stop_reason":"tool_use","tool_calls":[{"id":"tc-1","name":"bash","input":{"command":"ls"}}]}}
 
-<span class="text-gray-600"># Agent executes tool, sends result</span>
-{"jsonrpc":"2.0","id":2,"method":"tool_result","params":{"tool_call_id":"tc-1","result":"main.rs\nlib.rs"}}
+<span class="text-gray-600"># Runtime executes tool, sends result in next turn</span>
+{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-1","content":"main.rs\nlib.rs"}]}}
 
-<span class="text-gray-600"># Tightbeam streams continuation</span>
+<span class="text-gray-600"># Daemon streams continuation</span>
 {"jsonrpc":"2.0","method":"output","params":{"stream":"content","data":{"type":"text","text":"The directory contains..."}}}
-{"jsonrpc":"2.0","id":2,"result":{"stop_reason":"end_turn","text":"The directory contains main.rs and lib.rs."}}</pre>
+{"jsonrpc":"2.0","id":2,"result":{"stop_reason":"end_turn","content":"The directory contains main.rs and lib.rs."}}</pre>
     </section>
 
     <!-- Ecosystem -->
@@ -198,19 +198,17 @@ docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
       <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Install</span>
 curl -fsSL https://raw.githubusercontent.com/calebfaruki/tightbeam/main/install.sh | sh
 
-<span class="text-gray-600"># Create an agent profile</span>
-cat > ~/.config/tightbeam/agents/my-agent.toml &lt;&lt; 'EOF'
-[provider]
-name = "claude"
+<span class="text-gray-600"># Create a registry (LLM providers and MCP servers)</span>
+cat > ~/.config/tightbeam/registry.toml &lt;&lt; 'EOF'
+[llm.claude-sonnet]
+provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
-max_tokens = 8192
+EOF
 
-[socket]
-path = "my-agent.sock"
-
-[log]
-path = "my-agent/"
+<span class="text-gray-600"># Create an agent profile</span>
+cat > ~/.config/tightbeam/agents/my-agent.toml &lt;&lt; 'EOF'
+[llm.claude-sonnet]
 EOF
 
 <span class="text-gray-600"># Run your container</span>
