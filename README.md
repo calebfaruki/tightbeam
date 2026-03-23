@@ -24,7 +24,7 @@ AI agents running in containers need to call LLM APIs, but giving them API keys 
 - **No audit trail** — the agent calls whatever it wants with your credentials
 - **No conversation control** — the agent manages its own context window
 
-Tightbeam solves this by proxying LLM calls through the host. The container sends messages, the host attaches credentials and manages history. The agent is stateless — it doesn't know the API key, the model, or even the provider.
+Tightbeam solves this by proxying LLM calls through the host. The container sends messages, the host attaches credentials and manages history. The runtime is stateless — it doesn't know the API key, the model, or even the provider.
 
 When the container has no network egress, tightbeam is the agent's sole communication gateway to the outside world.
 
@@ -297,7 +297,7 @@ MCP connections are lazy (first turn, not startup) and cached for the session. A
 
 ## Conversation Ownership
 
-Tightbeam owns the conversation. The agent is stateless.
+Tightbeam owns the conversation. The runtime is stateless.
 
 1. Runtime sends a `turn` with new messages
 2. Daemon logs messages to NDJSON, attaches credentials, forwards to LLM
