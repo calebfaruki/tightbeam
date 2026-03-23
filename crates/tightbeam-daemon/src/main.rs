@@ -161,7 +161,10 @@ async fn send_command(args: &[String]) -> Result<(), String> {
         } else if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
             match method {
                 "delivered" => {}
-                "end_turn" => break,
+                "end_turn" => {
+                    println!();
+                    break;
+                }
                 "output" => {
                     if let Some(text) = value["params"]["data"]["text"].as_str() {
                         print!("{text}");
