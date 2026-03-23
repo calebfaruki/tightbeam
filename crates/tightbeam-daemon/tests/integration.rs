@@ -127,10 +127,19 @@ async fn start_daemon(
     })
 }
 
+const REGISTER_FRAME: &str = r#"{"jsonrpc":"2.0","method":"register","params":{"role":"runtime"}}"#;
+
+async fn send_register(writer: &mut tokio::net::unix::OwnedWriteHalf) {
+    write_frame(writer, REGISTER_FRAME.as_bytes())
+        .await
+        .unwrap();
+}
+
 async fn send_and_collect(sock_path: &std::path::Path, request_json: &str) -> Vec<String> {
     let stream = UnixStream::connect(sock_path).await.unwrap();
     let (mut reader, mut writer) = stream.into_split();
 
+    send_register(&mut writer).await;
     write_frame(&mut writer, request_json.as_bytes())
         .await
         .unwrap();
@@ -164,6 +173,12 @@ async fn send_and_read_response(
         }
     }
     lines
+}
+
+async fn read_one_frame(reader: &mut tokio::net::unix::OwnedReadHalf) -> serde_json::Value {
+    let frame = read_frame(reader).await.unwrap().unwrap();
+    let raw = String::from_utf8_lossy(&frame);
+    serde_json::from_str(&raw).unwrap()
 }
 
 #[derive(Deserialize)]
@@ -329,6 +344,7 @@ mod protocol_integration {
 
         let stream = UnixStream::connect(&sock).await.unwrap();
         let (mut reader, mut writer) = stream.into_split();
+        send_register(&mut writer).await;
 
         let request1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","tools":[{"name":"bash","description":"Run a command","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"List files"}]}]}}"#;
         let lines1 = send_and_read_response(&mut writer, &mut reader, request1).await;
@@ -437,18 +453,13 @@ mod protocol_integration {
     }
 
     #[tokio::test]
-    async fn future_methods_return_not_implemented() {
+    async fn mcp_call_returns_not_implemented() {
         let sock = test_socket_path("future");
         let logs = test_logs_dir("future");
 
         let provider = MockProvider::new(vec![]);
         let _handle = start_daemon(&sock, provider, logs.clone()).await;
         tokio::time::sleep(WAIT).await;
-
-        let send_msg =
-            r#"{"jsonrpc":"2.0","id":1,"method":"send_message","params":{"text":"hello"}}"#;
-        let lines = send_and_collect(&sock, send_msg).await;
-        assert_error_contains(&lines, "not implemented");
 
         let mcp = r#"{"jsonrpc":"2.0","id":2,"method":"mcp_call","params":{"server":"github"}}"#;
         let lines = send_and_collect(&sock, mcp).await;
@@ -488,6 +499,7 @@ mod protocol_integration {
 
         let stream = UnixStream::connect(&sock).await.unwrap();
         let (mut reader, mut writer) = stream.into_split();
+        send_register(&mut writer).await;
 
         let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"system":"You are helpful","messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}}"#;
         let _ = send_and_read_response(&mut writer, &mut reader, req1).await;
@@ -797,6 +809,7 @@ mod mcp_integration {
 
         let stream = UnixStream::connect(&sock).await.unwrap();
         let (mut reader, mut writer) = stream.into_split();
+        send_register(&mut writer).await;
 
         let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Search and list"}]}]}}"#;
         let lines1 = send_and_read_response(&mut writer, &mut reader, req1).await;
@@ -974,6 +987,523 @@ mod mcp_integration {
             err_msg.contains("MCP init"),
             "error should mention MCP init, got: {err_msg}"
         );
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+}
+
+// --- Send integration tests ---
+
+mod send_integration {
+    use super::*;
+
+    async fn send_rpc_frame(writer: &mut tokio::net::unix::OwnedWriteHalf, id: u64, text: &str) {
+        let rpc = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "send",
+            "params": {"content": [{"type": "text", "text": text}]}
+        });
+        let payload = serde_json::to_vec(&rpc).unwrap();
+        write_frame(writer, &payload).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_without_runtime_returns_error() {
+        let sock = test_socket_path("send-nort");
+        let logs = test_logs_dir("send-nort");
+
+        let provider = MockProvider::new(vec![]);
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut reader, mut writer) = stream.into_split();
+        send_rpc_frame(&mut writer, 1, "Hello").await;
+
+        let resp = read_one_frame(&mut reader).await;
+        assert!(resp.get("error").is_some(), "should get error: {resp}");
+        let msg = resp["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("not connected"),
+            "error should mention runtime not connected, got: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn send_delivers_to_runtime_and_streams_output() {
+        let sock = test_socket_path("send-deliver");
+        let logs = test_logs_dir("send-deliver");
+
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::ContentDelta {
+                text: "Hello ".into(),
+            },
+            StreamEvent::ContentDelta {
+                text: "back".into(),
+            },
+            StreamEvent::Done {
+                stop_reason: "end_turn".into(),
+            },
+        ]]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        // Connect as runtime
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        // Connect as subscriber and send
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+        send_rpc_frame(&mut sub_writer, 1, "Hi agent").await;
+
+        // Subscriber should get "delivered" response
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        // Runtime should receive human_message
+        let human = read_one_frame(&mut rt_reader).await;
+        assert_eq!(human["method"], "human_message");
+        assert_eq!(human["params"]["content"][0]["text"], "Hi agent");
+
+        // Runtime sends turn back
+        let turn_req = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Hi agent"}]}]}}"#;
+        write_frame(&mut rt_writer, turn_req.as_bytes())
+            .await
+            .unwrap();
+
+        // Read runtime's response (notifications + final)
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                break;
+            }
+        }
+
+        // Subscriber should receive text output notifications and end_turn
+        let mut sub_frames = Vec::new();
+        loop {
+            let frame = read_one_frame(&mut sub_reader).await;
+            let method = frame["method"].as_str().unwrap_or("").to_string();
+            sub_frames.push(frame);
+            if method == "end_turn" {
+                break;
+            }
+        }
+
+        let text_notifs: Vec<_> = sub_frames
+            .iter()
+            .filter(|f| f["method"] == "output")
+            .collect();
+        assert!(
+            !text_notifs.is_empty(),
+            "subscriber should receive text output notifications"
+        );
+
+        let last = sub_frames.last().unwrap();
+        assert_eq!(last["method"], "end_turn");
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn send_when_busy_queues() {
+        let sock = test_socket_path("send-queue");
+        let logs = test_logs_dir("send-queue");
+
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamEvent::ContentDelta {
+                    text: "First".into(),
+                },
+                StreamEvent::Done {
+                    stop_reason: "end_turn".into(),
+                },
+            ],
+            vec![
+                StreamEvent::ContentDelta {
+                    text: "Second".into(),
+                },
+                StreamEvent::Done {
+                    stop_reason: "end_turn".into(),
+                },
+            ],
+        ]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        // Connect runtime
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        // Subscriber 1 sends (should be delivered)
+        let sub1_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub1_reader, mut sub1_writer) = sub1_stream.into_split();
+        send_rpc_frame(&mut sub1_writer, 1, "First message").await;
+
+        let resp1 = read_one_frame(&mut sub1_reader).await;
+        assert_eq!(resp1["result"]["status"], "delivered");
+
+        // Subscriber 2 sends while busy (should be queued)
+        let sub2_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub2_reader, mut sub2_writer) = sub2_stream.into_split();
+        send_rpc_frame(&mut sub2_writer, 1, "Second message").await;
+
+        let resp2 = read_one_frame(&mut sub2_reader).await;
+        assert_eq!(resp2["result"]["status"], "queued");
+
+        // Runtime processes first message
+        let human1 = read_one_frame(&mut rt_reader).await;
+        assert_eq!(human1["method"], "human_message");
+
+        let turn1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"First message"}]}]}}"#;
+        write_frame(&mut rt_writer, turn1.as_bytes()).await.unwrap();
+
+        // Read runtime response for turn 1
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                break;
+            }
+        }
+
+        // Sub1 (active subscriber) should receive end_turn for turn 1
+        loop {
+            let frame = read_one_frame(&mut sub1_reader).await;
+            if frame["method"] == "end_turn" {
+                break;
+            }
+        }
+
+        // After turn 1 completes, queued message should be delivered
+        let human2 = read_one_frame(&mut rt_reader).await;
+        assert_eq!(human2["method"], "human_message");
+        assert_eq!(human2["params"]["content"][0]["text"], "Second message");
+
+        // Sub2 should get "delivered" notification
+        let delivered = read_one_frame(&mut sub2_reader).await;
+        assert_eq!(delivered["method"], "delivered");
+
+        // Runtime processes second message
+        let turn2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Second message"}]}]}}"#;
+        write_frame(&mut rt_writer, turn2.as_bytes()).await.unwrap();
+
+        // Read runtime response for turn 2
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                break;
+            }
+        }
+
+        // Sub2 should get end_turn
+        loop {
+            let frame = read_one_frame(&mut sub2_reader).await;
+            if frame["method"] == "end_turn" {
+                break;
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn runtime_disconnect_notifies_subscribers() {
+        let sock = test_socket_path("send-rtdc");
+        let logs = test_logs_dir("send-rtdc");
+
+        let provider = MockProvider::new(vec![]);
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        // Connect runtime
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        // Connect subscriber and send
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+        send_rpc_frame(&mut sub_writer, 1, "Hello").await;
+
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        // Disconnect runtime
+        drop(rt_reader);
+        drop(rt_writer);
+
+        // Subscriber should receive disconnect error
+        tokio::time::sleep(WAIT).await;
+        let frame = read_one_frame(&mut sub_reader).await;
+        assert_eq!(frame["method"], "error");
+        assert!(frame["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("disconnected"));
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn tool_use_events_not_broadcast_to_subscribers() {
+        let sock = test_socket_path("send-toolfilter");
+        let logs = test_logs_dir("send-toolfilter");
+
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamEvent::ContentDelta {
+                    text: "Let me run that".into(),
+                },
+                StreamEvent::ToolUseStart {
+                    id: "tc-1".into(),
+                    name: "bash".into(),
+                },
+                StreamEvent::ToolUseInput {
+                    json: r#"{"command":"ls"}"#.into(),
+                },
+                StreamEvent::Done {
+                    stop_reason: "tool_use".into(),
+                },
+            ],
+            vec![
+                StreamEvent::ContentDelta {
+                    text: "Here are the files".into(),
+                },
+                StreamEvent::Done {
+                    stop_reason: "end_turn".into(),
+                },
+            ],
+        ]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+        send_rpc_frame(&mut sub_writer, 1, "List files").await;
+
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        let _human = read_one_frame(&mut rt_reader).await;
+        let turn1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"List files"}]}]}}"#;
+        write_frame(&mut rt_writer, turn1.as_bytes()).await.unwrap();
+
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                assert_eq!(frame["result"]["stop_reason"], "tool_use");
+                break;
+            }
+        }
+
+        let turn2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-1","content":[{"type":"text","text":"main.rs\nlib.rs"}]}]}}"#;
+        write_frame(&mut rt_writer, turn2.as_bytes()).await.unwrap();
+
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                assert_eq!(frame["result"]["stop_reason"], "end_turn");
+                break;
+            }
+        }
+
+        let mut sub_frames = Vec::new();
+        loop {
+            let frame = read_one_frame(&mut sub_reader).await;
+            let method = frame["method"].as_str().unwrap_or("").to_string();
+            sub_frames.push(frame);
+            if method == "end_turn" {
+                break;
+            }
+        }
+
+        let text_notifs: Vec<_> = sub_frames
+            .iter()
+            .filter(|f| {
+                f["method"] == "output" && f["params"]["data"]["type"].as_str() == Some("text")
+            })
+            .collect();
+        assert!(
+            !text_notifs.is_empty(),
+            "subscriber should receive text notifications"
+        );
+
+        let tool_notifs: Vec<_> = sub_frames
+            .iter()
+            .filter(|f| {
+                if let Some(dtype) = f["params"]["data"]["type"].as_str() {
+                    dtype == "tool_use_start" || dtype == "tool_use_input"
+                } else {
+                    false
+                }
+            })
+            .collect();
+        assert!(
+            tool_notifs.is_empty(),
+            "subscriber should NOT receive tool_use events, got: {tool_notifs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn tool_use_does_not_trigger_premature_end_turn() {
+        let sock = test_socket_path("send-toolnofin");
+        let logs = test_logs_dir("send-toolnofin");
+
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "tc-1".into(),
+                    name: "bash".into(),
+                },
+                StreamEvent::ToolUseInput {
+                    json: r#"{"command":"ls"}"#.into(),
+                },
+                StreamEvent::Done {
+                    stop_reason: "tool_use".into(),
+                },
+            ],
+            vec![
+                StreamEvent::ContentDelta {
+                    text: "Done".into(),
+                },
+                StreamEvent::Done {
+                    stop_reason: "end_turn".into(),
+                },
+            ],
+        ]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+        send_rpc_frame(&mut sub_writer, 1, "Run command").await;
+
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        let _human = read_one_frame(&mut rt_reader).await;
+        let turn1 = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"tools":[{"name":"bash","description":"Run","parameters":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Run command"}]}]}}"#;
+        write_frame(&mut rt_writer, turn1.as_bytes()).await.unwrap();
+
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                break;
+            }
+        }
+
+        // After ToolUse, subscriber should NOT receive end_turn yet
+        let no_end_turn = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            read_one_frame(&mut sub_reader),
+        )
+        .await;
+        assert!(
+            no_end_turn.is_err(),
+            "subscriber should NOT receive end_turn after ToolUse (should timeout)"
+        );
+
+        let turn2 = r#"{"jsonrpc":"2.0","id":2,"method":"turn","params":{"messages":[{"role":"tool","tool_call_id":"tc-1","content":[{"type":"text","text":"file1.rs"}]}]}}"#;
+        write_frame(&mut rt_writer, turn2.as_bytes()).await.unwrap();
+
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                break;
+            }
+        }
+
+        // NOW subscriber should get end_turn
+        loop {
+            let frame = read_one_frame(&mut sub_reader).await;
+            if frame["method"] == "end_turn" {
+                break;
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn max_tokens_triggers_finish_turn() {
+        let sock = test_socket_path("send-maxtoken");
+        let logs = test_logs_dir("send-maxtoken");
+
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::ContentDelta {
+                text: "partial...".into(),
+            },
+            StreamEvent::Done {
+                stop_reason: "max_tokens".into(),
+            },
+        ]]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+        send_rpc_frame(&mut sub_writer, 1, "Generate long text").await;
+
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        let _human = read_one_frame(&mut rt_reader).await;
+        let turn = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Generate long text"}]}]}}"#;
+        write_frame(&mut rt_writer, turn.as_bytes()).await.unwrap();
+
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                assert_eq!(frame["result"]["stop_reason"], "max_tokens");
+                break;
+            }
+        }
+
+        // max_tokens should trigger finish_turn → subscriber gets end_turn
+        loop {
+            let frame = read_one_frame(&mut sub_reader).await;
+            if frame["method"] == "end_turn" {
+                break;
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&logs);
         let _ = std::fs::remove_file(&sock);

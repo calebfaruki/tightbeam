@@ -7,9 +7,11 @@ use tightbeam_daemon::{
 
 use std::collections::HashMap;
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::net::UnixListener;
+use tightbeam_protocol::framing::{read_frame, write_frame};
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
@@ -104,6 +106,82 @@ fn status_command() {
     }
 }
 
+async fn send_command(args: &[String]) -> Result<(), String> {
+    if args.len() < 2 {
+        return Err("usage: tightbeam-daemon send <agent> <message>".into());
+    }
+
+    let agent = &args[0];
+    let no_wait = args.iter().any(|a| a == "--no-wait");
+    let message: String = args[1..]
+        .iter()
+        .filter(|a| a.as_str() != "--no-wait")
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if message.is_empty() {
+        return Err("usage: tightbeam-daemon send <agent> <message>".into());
+    }
+
+    let sock_path = sockets_dir().join(format!("{agent}.sock"));
+    let stream = UnixStream::connect(&sock_path)
+        .await
+        .map_err(|e| format!("cannot connect to agent '{agent}': {e}"))?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    let rpc = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "send",
+        "params": {"content": [{"type": "text", "text": message}]}
+    });
+    let payload = serde_json::to_vec(&rpc).map_err(|e| format!("serialize error: {e}"))?;
+    write_frame(&mut writer, &payload)
+        .await
+        .map_err(|e| format!("write error: {e}"))?;
+
+    loop {
+        let frame = read_frame(&mut reader)
+            .await
+            .map_err(|e| format!("read error: {e}"))?
+            .ok_or("daemon disconnected")?;
+        let raw = String::from_utf8_lossy(&frame);
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("invalid JSON: {e}"))?;
+
+        if value.get("id").is_some() {
+            if let Some(error) = value.get("error") {
+                let msg = error["message"].as_str().unwrap_or("unknown error");
+                return Err(msg.to_string());
+            }
+            if no_wait {
+                return Ok(());
+            }
+        } else if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
+            match method {
+                "delivered" => {}
+                "end_turn" => break,
+                "output" => {
+                    if let Some(text) = value["params"]["data"]["text"].as_str() {
+                        print!("{text}");
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                "error" => {
+                    let msg = value["params"]["message"]
+                        .as_str()
+                        .unwrap_or("unknown error");
+                    return Err(msg.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
@@ -151,8 +229,15 @@ async fn main() {
             });
             return;
         }
+        "send" => {
+            if let Err(e) = send_command(&args[2..]).await {
+                eprintln!("tightbeam: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         _ => {
-            eprintln!("usage: tightbeam-daemon <start|stop|init|status|show|logs|version>");
+            eprintln!("usage: tightbeam-daemon <start|stop|init|status|show|logs|send|version>");
             std::process::exit(1);
         }
     }

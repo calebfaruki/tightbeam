@@ -134,6 +134,8 @@ tightbeam-daemon init --uninstall  # Remove system service
 tightbeam-daemon status            # Show running state, connected agents
 tightbeam-daemon show <agent>      # Print active profile for an agent
 tightbeam-daemon logs <agent>      # Print conversation log
+tightbeam-daemon send <agent> <message>          # Send a message to an agent
+tightbeam-daemon send <agent> <message> --no-wait  # Send without waiting for response
 tightbeam-daemon stop              # Stop and uninstall service
 tightbeam-daemon version           # Print version
 ```
@@ -142,7 +144,7 @@ tightbeam-daemon version           # Print version
 
 The runtime runs inside the container. It connects to the daemon socket, loads a system prompt, and enters the agent loop:
 
-1. Wait for a human message from the daemon
+1. Register with the daemon, then wait for a human message
 2. Send a `turn` with system prompt, tool definitions, and the message
 3. If the LLM returns tool calls, execute them locally and send results in a new `turn`
 4. Repeat until `end_turn` or `max_tokens`, then wait for the next human message
@@ -240,6 +242,76 @@ API errors forwarded as-is. Tightbeam does not retry. The agent decides what to 
 }
 ```
 
+### Connection Handshake
+
+Every connection to an agent socket must identify itself with its first frame:
+
+- **Runtime** sends a `register` request. The daemon enters the runtime handler (turn loop).
+- **CLI / channel adapter** sends a `send` request. The daemon enters the subscriber handler.
+
+Runtime registration:
+```json
+{"jsonrpc": "2.0", "method": "register", "params": {"role": "runtime"}}
+```
+
+No response. The daemon begins sending `human_message` notifications when messages arrive.
+
+### Request: `send`
+
+Inject a human message into the agent's conversation. Sent by CLI or channel adapters as the first frame on a new connection.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "send",
+  "params": {
+    "content": [{"type": "text", "text": "Create a hello world file"}]
+  }
+}
+```
+
+Response (agent idle, message delivered immediately):
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"status": "delivered"}}
+```
+
+Response (agent busy, message queued):
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"status": "queued"}}
+```
+
+After a queued message is delivered:
+```json
+{"jsonrpc": "2.0", "method": "delivered"}
+```
+
+Response (no runtime connected):
+```json
+{"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "runtime not connected"}}
+```
+
+### Subscriber Notifications
+
+After sending a message, the connection becomes a subscriber. Subscribers receive copies of the agent's text output (not tool calls) and lifecycle events:
+
+Text output (streamed):
+```json
+{"jsonrpc": "2.0", "method": "output", "params": {"stream": "content", "data": {"type": "text", "text": "Hello"}}}
+```
+
+Agent turn complete:
+```json
+{"jsonrpc": "2.0", "method": "end_turn"}
+```
+
+Runtime disconnected:
+```json
+{"jsonrpc": "2.0", "method": "error", "params": {"message": "agent disconnected"}}
+```
+
+Subscribers receive text output only. Tool use events are internal to the runtime and are not broadcast.
+
 ## Configuration
 
 ### Registry
@@ -315,6 +387,7 @@ Tightbeam owns the conversation. The runtime is stateless.
 4. Runtime executes tool calls locally, sends results in next `turn`
 5. Daemon logs results, calls LLM again
 6. Loop continues until `end_turn` or `max_tokens`
+7. External messages arrive via `send` — the daemon delivers them as `human_message` notifications to the runtime, and the loop resumes from step 1
 
 ## Host Filesystem Layout
 
@@ -340,3 +413,4 @@ Tightbeam owns the conversation. The runtime is stateless.
 - MCP servers are configured on the host. The runtime has no knowledge of MCP.
 - All messages (user, assistant, tool results) are logged to NDJSON files on the host.
 - Errors are forwarded as-is. Tightbeam does not retry or modify API responses.
+- External message delivery (`send`) goes through the daemon. The daemon queues messages for busy agents and tracks subscribers. Subscribers see agent text output only, never tool call internals.

@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 pub use tightbeam_protocol::{
-    ContentBlock, Message, StopReason, StreamData, ToolCall, ToolDefinition, TurnRequest,
-    TurnResponse,
+    content_text, framing, ContentBlock, Message, StopReason, StreamData, ToolCall, ToolDefinition,
+    TurnRequest, TurnResponse,
 };
-pub use tightbeam_protocol::{content_text, framing};
 
 // --- Inbound requests (container → tightbeam) ---
 
@@ -60,10 +59,19 @@ pub struct RpcError {
     pub message: String,
 }
 
+// --- Send params ---
+
+#[derive(Debug, Deserialize)]
+pub struct SendParams {
+    pub content: Vec<ContentBlock>,
+}
+
 // --- Validation ---
 
 pub enum ValidatedRequest {
     Turn { id: u64, params: TurnRequest },
+    Send { id: u64, params: SendParams },
+    Register,
 }
 
 pub fn validate_request(raw: &str) -> Result<ValidatedRequest, ErrorResponse> {
@@ -82,26 +90,35 @@ pub fn validate_request(raw: &str) -> Result<ValidatedRequest, ErrorResponse> {
         return Err(build_error(id, -32600, "invalid jsonrpc version".into()));
     }
 
-    let params_value = request
-        .params
-        .ok_or_else(|| build_error(id, -32600, "missing params".into()))?;
-
     match request.method.as_str() {
-        "turn" => {
-            let params: TurnRequest = serde_json::from_value(params_value)
-                .map_err(|e| build_error(id, -32602, format!("invalid turn params: {e}")))?;
-            Ok(ValidatedRequest::Turn { id, params })
+        "register" => Ok(ValidatedRequest::Register),
+        method => {
+            let params_value = request
+                .params
+                .ok_or_else(|| build_error(id, -32600, "missing params".into()))?;
+
+            match method {
+                "turn" => {
+                    let params: TurnRequest =
+                        serde_json::from_value(params_value).map_err(|e| {
+                            build_error(id, -32602, format!("invalid turn params: {e}"))
+                        })?;
+                    Ok(ValidatedRequest::Turn { id, params })
+                }
+                "send" => {
+                    let params: SendParams = serde_json::from_value(params_value).map_err(|e| {
+                        build_error(id, -32602, format!("invalid send params: {e}"))
+                    })?;
+                    Ok(ValidatedRequest::Send { id, params })
+                }
+                "mcp_call" => Err(build_error(
+                    id,
+                    -32601,
+                    "method 'mcp_call' not implemented (v2)".to_string(),
+                )),
+                _ => Err(build_error(id, -32601, format!("unknown method: {method}"))),
+            }
         }
-        "send_message" | "mcp_call" => Err(build_error(
-            id,
-            -32601,
-            format!("method '{}' not implemented (v2)", request.method),
-        )),
-        _ => Err(build_error(
-            id,
-            -32601,
-            format!("unknown method: {}", request.method),
-        )),
     }
 }
 
@@ -124,6 +141,44 @@ pub fn build_notification(stream: &str, data: StreamData) -> StreamNotification 
             data,
         },
     }
+}
+
+pub fn build_send_response(id: u64, status: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": { "status": status }
+    })
+}
+
+pub fn build_human_message_notification(content: &[ContentBlock]) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "human_message",
+        "params": { "content": content }
+    })
+}
+
+pub fn build_delivered_notification() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "delivered"
+    })
+}
+
+pub fn build_end_turn_notification() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "end_turn"
+    })
+}
+
+pub fn build_disconnect_notification() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "error",
+        "params": { "message": "agent disconnected" }
+    })
 }
 
 pub fn build_final_response(
@@ -188,16 +243,7 @@ mod protocol_parsing {
     }
 
     #[test]
-    fn future_methods_return_not_implemented() {
-        let raw = r#"{"jsonrpc":"2.0","id":3,"method":"send_message","params":{"text":"hello"}}"#;
-        match validate_request(raw) {
-            Err(e) => {
-                assert_eq!(e.error.code, -32601);
-                assert!(e.error.message.contains("not implemented"));
-            }
-            _ => panic!("expected error"),
-        }
-
+    fn mcp_call_returns_not_implemented() {
         let raw = r#"{"jsonrpc":"2.0","id":4,"method":"mcp_call","params":{"server":"github"}}"#;
         match validate_request(raw) {
             Err(e) => {
@@ -206,6 +252,94 @@ mod protocol_parsing {
             }
             _ => panic!("expected error"),
         }
+    }
+
+    #[test]
+    fn valid_send_parses() {
+        let raw = r#"{"jsonrpc":"2.0","id":5,"method":"send","params":{"content":[{"type":"text","text":"Hello agent"}]}}"#;
+        let Ok(ValidatedRequest::Send { id, params }) = validate_request(raw) else {
+            panic!("expected Send");
+        };
+        assert_eq!(id, 5);
+        assert_eq!(params.content.len(), 1);
+        assert_eq!(params.content[0].as_text(), Some("Hello agent"));
+    }
+
+    #[test]
+    fn send_without_content_returns_error() {
+        let raw = r#"{"jsonrpc":"2.0","id":6,"method":"send","params":{}}"#;
+        match validate_request(raw) {
+            Err(e) => {
+                assert_eq!(e.error.code, -32602);
+                assert!(e.error.message.contains("invalid send params"));
+            }
+            _ => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn register_parses_without_params() {
+        let raw = r#"{"jsonrpc":"2.0","method":"register"}"#;
+        assert!(matches!(
+            validate_request(raw),
+            Ok(ValidatedRequest::Register)
+        ));
+    }
+
+    #[test]
+    fn register_parses_with_params() {
+        let raw = r#"{"jsonrpc":"2.0","method":"register","params":{"role":"runtime"}}"#;
+        assert!(matches!(
+            validate_request(raw),
+            Ok(ValidatedRequest::Register)
+        ));
+    }
+
+    #[test]
+    fn send_response_builders() {
+        let resp = build_send_response(1, "delivered");
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        let resp = build_send_response(2, "queued");
+        assert_eq!(resp["id"], 2);
+        assert_eq!(resp["result"]["status"], "queued");
+    }
+
+    #[test]
+    fn human_message_notification_builder() {
+        let content = ContentBlock::text_content("Fix the bug");
+        let notif = build_human_message_notification(&content);
+        assert_eq!(notif["jsonrpc"], "2.0");
+        assert_eq!(notif["method"], "human_message");
+        assert_eq!(notif["params"]["content"][0]["text"], "Fix the bug");
+        assert!(notif.get("id").is_none());
+    }
+
+    #[test]
+    fn delivered_notification_has_no_id() {
+        let notif = build_delivered_notification();
+        assert_eq!(notif["jsonrpc"], "2.0");
+        assert_eq!(notif["method"], "delivered");
+        assert!(notif.get("id").is_none());
+    }
+
+    #[test]
+    fn end_turn_notification_has_no_id() {
+        let notif = build_end_turn_notification();
+        assert_eq!(notif["jsonrpc"], "2.0");
+        assert_eq!(notif["method"], "end_turn");
+        assert!(notif.get("id").is_none());
+    }
+
+    #[test]
+    fn disconnect_notification_structure() {
+        let notif = build_disconnect_notification();
+        assert_eq!(notif["jsonrpc"], "2.0");
+        assert_eq!(notif["method"], "error");
+        assert_eq!(notif["params"]["message"], "agent disconnected");
+        assert!(notif.get("id").is_none());
     }
 
     #[test]

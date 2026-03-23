@@ -760,10 +760,7 @@ mod tests {
 
         // Should succeed via retry
         assert!(msg.is_error.is_none(), "should succeed on retry, got error");
-        assert_eq!(
-            content_text(&msg.content),
-            Some("retry succeeded")
-        );
+        assert_eq!(content_text(&msg.content), Some("retry succeeded"));
         assert_eq!(msg.tool_call_id.as_deref(), Some("tc-retry"));
     }
 

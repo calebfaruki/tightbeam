@@ -374,7 +374,10 @@ mod serialization {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: HumanMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(content_text(&Some(parsed.content)), Some("Fix the login bug."));
+        assert_eq!(
+            content_text(&Some(parsed.content)),
+            Some("Fix the login bug.")
+        );
     }
 
     #[test]

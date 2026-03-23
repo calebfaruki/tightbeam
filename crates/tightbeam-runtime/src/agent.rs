@@ -189,7 +189,12 @@ mod agent_tests {
         let agent_handle = tokio::spawn(async move { run_agent(config).await });
 
         let (stream, _) = listener.accept().await.unwrap();
-        let (read, write) = stream.into_split();
+        let (mut read, write) = stream.into_split();
+
+        // Consume the register frame sent by DaemonConnection::connect()
+        let frame = read_frame(&mut read).await.unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(parsed["method"], "register");
 
         let mock = MockDaemon {
             reader: read,
@@ -236,7 +241,10 @@ mod agent_tests {
 
         assert!(turn2["params"].get("system").is_none() || turn2["params"]["system"].is_null());
         assert!(turn2["params"].get("tools").is_none() || turn2["params"]["tools"].is_null());
-        assert_eq!(turn2["params"]["messages"][0]["content"][0]["text"], "Second");
+        assert_eq!(
+            turn2["params"]["messages"][0]["content"][0]["text"],
+            "Second"
+        );
 
         drop(mock);
         let _ = agent_handle.await;
@@ -337,7 +345,10 @@ mod agent_tests {
 
         mock.send_human_message("After limit").await;
         let turn3 = mock.read_turn().await;
-        assert_eq!(turn3["params"]["messages"][0]["content"][0]["text"], "After limit");
+        assert_eq!(
+            turn3["params"]["messages"][0]["content"][0]["text"],
+            "After limit"
+        );
 
         drop(mock);
         let _ = agent_handle.await;
