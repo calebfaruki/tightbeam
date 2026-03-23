@@ -48,6 +48,11 @@ mkdir -p "$INSTALL_DIR"
 $DOWNLOAD "$INSTALL_DIR/tightbeam-daemon" "$URL"
 chmod +x "$INSTALL_DIR/tightbeam-daemon"
 
+# Ad-hoc sign on macOS (unsigned binaries get Killed: 9)
+case "$OS_NAME" in
+    darwin) codesign -s - "$INSTALL_DIR/tightbeam-daemon" ;;
+esac
+
 # Verify
 if ! "$INSTALL_DIR/tightbeam-daemon" version >/dev/null 2>&1; then
     echo "tightbeam: download failed or binary is incompatible"
