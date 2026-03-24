@@ -14,7 +14,7 @@ pub struct Registry {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegistryLlm {
-    pub provider: String,
+    pub provider: tightbeam_providers::Provider,
     pub model: String,
     pub api_key: String,
     pub max_tokens: Option<u32>,
@@ -55,7 +55,7 @@ pub struct AgentProfile {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedLlm {
-    pub provider: String,
+    pub provider: tightbeam_providers::Provider,
     pub model: String,
     pub api_key: String,
     pub max_tokens: u32,
@@ -85,7 +85,7 @@ struct RawAgentProfile {
 
 #[derive(Debug, Deserialize)]
 struct RawLlmOverride {
-    provider: Option<String>,
+    provider: Option<tightbeam_providers::Provider>,
     model: Option<String>,
     api_key: Option<String>,
     max_tokens: Option<u32>,
@@ -204,7 +204,7 @@ api_key = "ANTHROPIC_API_KEY"
 max_tokens = 8192
 
 [llm.gpt-4o]
-provider = "openai"
+provider = "anthropic"
 model = "gpt-4o"
 api_key = "OPENAI_API_KEY"
 
@@ -219,7 +219,10 @@ auth_token = "SEARCH_API_KEY"
         let reg = Registry::parse(toml).unwrap();
         assert_eq!(reg.llm.len(), 2);
         assert_eq!(reg.mcp.len(), 2);
-        assert_eq!(reg.llm["claude-sonnet"].provider, "anthropic");
+        assert_eq!(
+            reg.llm["claude-sonnet"].provider,
+            tightbeam_providers::Provider::Anthropic
+        );
         assert_eq!(reg.llm["gpt-4o"].api_key, "OPENAI_API_KEY");
         assert_eq!(reg.mcp["github"].url, "https://mcp.github.com/sse");
         assert_eq!(reg.mcp["web-search"].auth_token, "SEARCH_API_KEY");
@@ -298,7 +301,10 @@ auth_token = "SEARCH_API_KEY"
     fn empty_llm_body_uses_all_registry_defaults() {
         let reg = test_registry();
         let profile = AgentProfile::resolve("[llm.claude-sonnet]\n", &reg).unwrap();
-        assert_eq!(profile.llm.provider, "anthropic");
+        assert_eq!(
+            profile.llm.provider,
+            tightbeam_providers::Provider::Anthropic
+        );
         assert_eq!(profile.llm.model, "claude-sonnet-4-20250514");
         assert_eq!(profile.llm.api_key, "ANTHROPIC_API_KEY");
         assert_eq!(profile.llm.max_tokens, 4096);
@@ -312,7 +318,10 @@ auth_token = "SEARCH_API_KEY"
 api_key = "AGENT_SPECIFIC_KEY"
 "#;
         let profile = AgentProfile::resolve(toml, &reg).unwrap();
-        assert_eq!(profile.llm.provider, "anthropic");
+        assert_eq!(
+            profile.llm.provider,
+            tightbeam_providers::Provider::Anthropic
+        );
         assert_eq!(profile.llm.model, "claude-sonnet-4-20250514");
         assert_eq!(profile.llm.api_key, "AGENT_SPECIFIC_KEY");
         assert_eq!(profile.llm.max_tokens, 4096);
@@ -323,13 +332,16 @@ api_key = "AGENT_SPECIFIC_KEY"
         let reg = test_registry();
         let toml = r#"
 [llm.claude-sonnet]
-provider = "custom"
+provider = "anthropic"
 model = "custom-model"
 api_key = "CUSTOM_KEY"
 max_tokens = 2048
 "#;
         let profile = AgentProfile::resolve(toml, &reg).unwrap();
-        assert_eq!(profile.llm.provider, "custom");
+        assert_eq!(
+            profile.llm.provider,
+            tightbeam_providers::Provider::Anthropic
+        );
         assert_eq!(profile.llm.model, "custom-model");
         assert_eq!(profile.llm.api_key, "CUSTOM_KEY");
         assert_eq!(profile.llm.max_tokens, 2048);
@@ -363,7 +375,7 @@ api_key = "KEY"
         reg.llm.insert(
             "gpt-4o".into(),
             RegistryLlm {
-                provider: "openai".into(),
+                provider: tightbeam_providers::Provider::Anthropic,
                 model: "gpt-4o".into(),
                 api_key: "OPENAI_KEY".into(),
                 max_tokens: None,

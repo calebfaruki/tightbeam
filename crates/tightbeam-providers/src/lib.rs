@@ -1,9 +1,10 @@
 pub mod claude;
 
-use crate::protocol::{Message, StreamData, ToolCall, ToolDefinition};
 use async_trait::async_trait;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use tightbeam_protocol::{Message, StreamData, ToolCall, ToolDefinition};
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -38,6 +39,20 @@ impl StreamEvent {
                 input: None,
             }),
             Self::Done { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Anthropic,
+}
+
+impl Provider {
+    pub fn build(&self) -> Box<dyn LlmProvider> {
+        match self {
+            Self::Anthropic => Box::new(claude::ClaudeProvider::new()),
         }
     }
 }
@@ -208,5 +223,17 @@ mod provider_helpers {
             calls[0].input.is_string(),
             "input should stay as raw string when JSON parsing fails"
         );
+    }
+
+    #[test]
+    fn provider_enum_deserializes_from_lowercase() {
+        let p: Provider = serde_json::from_str("\"anthropic\"").unwrap();
+        assert_eq!(p, Provider::Anthropic);
+    }
+
+    #[test]
+    fn provider_enum_rejects_unknown() {
+        let result: Result<Provider, _> = serde_json::from_str("\"banana\"");
+        assert!(result.is_err());
     }
 }

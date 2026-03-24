@@ -1,6 +1,4 @@
 use tightbeam_daemon::profile;
-use tightbeam_daemon::provider::claude::ClaudeProvider;
-use tightbeam_daemon::provider::LlmProvider;
 use tightbeam_daemon::{
     bind_agent_socket, run_daemon, ConversationMap, McpManagerMap, ProfileMap, ProviderMap,
 };
@@ -496,9 +494,13 @@ async fn main() {
         agent_names.join(", ")
     );
 
-    // Initialize providers
-    let mut provider_map: HashMap<String, Box<dyn LlmProvider>> = HashMap::new();
-    provider_map.insert("anthropic".into(), Box::new(ClaudeProvider::new()));
+    // Initialize providers from profiles
+    let mut provider_map = HashMap::new();
+    for profile in profile_map.values() {
+        provider_map
+            .entry(profile.llm.provider.clone())
+            .or_insert_with(|| profile.llm.provider.build());
+    }
 
     let profiles: ProfileMap = Arc::new(RwLock::new(profile_map));
     let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));

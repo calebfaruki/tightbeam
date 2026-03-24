@@ -3,8 +3,6 @@ pub mod init;
 pub mod mcp;
 pub mod profile;
 pub mod protocol;
-pub mod provider;
-pub mod streaming;
 
 use conversation::ConversationLog;
 use mcp::McpManager;
@@ -15,7 +13,9 @@ use protocol::{
     build_send_response, validate_request, ContentBlock, Message, SendParams, StopReason,
     StreamData, ToolCall, ValidatedRequest,
 };
-use provider::{collect_text, collect_tool_calls, LlmProvider, ProviderConfig, StreamEvent};
+use tightbeam_providers::{
+    collect_text, collect_tool_calls, LlmProvider, ProviderConfig, StreamEvent,
+};
 
 use futures::StreamExt;
 use std::collections::{HashMap, VecDeque};
@@ -30,7 +30,7 @@ use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock};
 
 pub type ProfileMap = Arc<RwLock<HashMap<String, AgentProfile>>>;
 pub type ConversationMap = Arc<RwLock<HashMap<String, ConversationLog>>>;
-pub type ProviderMap = Arc<HashMap<String, Box<dyn LlmProvider>>>;
+pub type ProviderMap = Arc<HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>>>;
 pub type McpManagerMap = Arc<RwLock<HashMap<String, McpManager>>>;
 pub type HumanMessageSenderMap = Arc<RwLock<HashMap<String, mpsc::Sender<HumanMessageDelivery>>>>;
 pub type AgentStateMap = Arc<HashMap<String, Arc<TokioMutex<AgentState>>>>;
@@ -585,7 +585,7 @@ async fn handle_runtime_connection(
                                 };
                                 let provider = providers
                                     .get(&profile.llm.provider)
-                                    .ok_or_else(|| format!("unknown provider: {}", profile.llm.provider))?;
+                                    .ok_or_else(|| format!("unknown provider: {:?}", profile.llm.provider))?;
                                 drop(profs);
 
                                 let subs = get_subscribers(&agent_state).await;

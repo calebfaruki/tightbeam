@@ -1247,6 +1247,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tightbeam-protocol",
+ "tightbeam-providers",
  "tokio",
  "toml",
  "tracing",
@@ -1260,6 +1261,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "tightbeam-providers"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tightbeam-protocol",
 ]
 
 [[package]]

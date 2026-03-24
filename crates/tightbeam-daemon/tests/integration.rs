@@ -8,11 +8,11 @@ use std::sync::{Arc, Mutex};
 use tightbeam_daemon::mcp::McpManager;
 use tightbeam_daemon::profile::{AgentProfile, ResolvedLlm, ResolvedMcp};
 use tightbeam_daemon::protocol::{Message, ToolDefinition};
-use tightbeam_daemon::provider::{self, LlmProvider, StreamEvent};
 use tightbeam_daemon::{
     bind_agent_socket, run_daemon, ConversationMap, McpManagerMap, ProfileMap, ProviderMap,
 };
 use tightbeam_protocol::framing::{read_frame, write_frame};
+use tightbeam_providers::{LlmProvider, ProviderConfig, StreamEvent};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 
@@ -49,7 +49,7 @@ impl LlmProvider for MockProvider {
         messages: &[Message],
         system: Option<&str>,
         tools: &[ToolDefinition],
-        _config: &provider::ProviderConfig,
+        _config: &ProviderConfig,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, String>> + Send>>, String>
     {
         self.call_log.lock().unwrap().push(CapturedCall {
@@ -85,7 +85,7 @@ fn test_logs_dir(name: &str) -> PathBuf {
 fn make_profile() -> AgentProfile {
     AgentProfile {
         llm: ResolvedLlm {
-            provider: "mock".into(),
+            provider: tightbeam_providers::Provider::Anthropic,
             model: "test-model".into(),
             api_key: "test-key".into(),
             max_tokens: 1024,
@@ -105,8 +105,9 @@ async fn start_daemon(
 
     let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
 
-    let mut providers: HashMap<String, Box<dyn LlmProvider>> = HashMap::new();
-    providers.insert("mock".into(), Box::new(provider));
+    let mut providers: HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> =
+        HashMap::new();
+    providers.insert(tightbeam_providers::Provider::Anthropic, Box::new(provider));
     let providers: ProviderMap = Arc::new(providers);
 
     let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
@@ -615,8 +616,9 @@ mod mcp_integration {
 
         let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
 
-        let mut providers: HashMap<String, Box<dyn LlmProvider>> = HashMap::new();
-        providers.insert("mock".into(), Box::new(provider));
+        let mut providers: HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> =
+            HashMap::new();
+        providers.insert(tightbeam_providers::Provider::Anthropic, Box::new(provider));
         let providers: ProviderMap = Arc::new(providers);
 
         let mut mcp_map = HashMap::new();
