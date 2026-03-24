@@ -14,7 +14,7 @@ Three components:
 
 3. **Registry + profiles** — a global registry defines available LLM providers and MCP servers. Per-agent TOML profiles reference registry entries by key, with optional overrides and MCP tool allowlists. Each agent gets its own unix socket. The agent never sees which model it talks to.
 
-The runtime sends new messages via `turn` requests over a length-prefixed binary framing protocol. The daemon attaches the API key from the host environment, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to per-agent NDJSON files on the host.
+The runtime sends new messages via `turn` requests over a length-prefixed binary framing protocol. The daemon attaches the API key from the profile, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to per-agent NDJSON files on the host.
 
 ## Why Tightbeam
 
@@ -38,7 +38,7 @@ Use [Airlock](https://github.com/calebfaruki/airlock) for CLI credential isolati
 curl -fsSL https://raw.githubusercontent.com/calebfaruki/tightbeam/main/install.sh | sh
 ```
 
-This downloads the daemon, installs it to `~/.local/bin/`, and runs `tightbeam-daemon init` to set up the system service.
+This downloads the daemon, ad-hoc signs it on macOS, installs it to `~/.local/bin/`, and runs `tightbeam-daemon init` to set up the system service. Pass `--force` to skip binary verification (useful if code signing fails).
 
 ### Container Setup
 
@@ -126,17 +126,21 @@ docker run \
 ### Daemon
 
 ```sh
-tightbeam-daemon start             # Run daemon in foreground
-tightbeam-daemon init              # Install as system service (systemd/launchd)
-tightbeam-daemon init --uninstall  # Remove system service
-tightbeam-daemon status            # Show running state, connected agents
-tightbeam-daemon show <agent>      # Print active profile for an agent
-tightbeam-daemon logs <agent>      # Print conversation log
-tightbeam-daemon send <agent> <message>          # Send a message to an agent
-tightbeam-daemon send <agent> <message> --no-wait  # Send without waiting for response
-tightbeam-daemon stop              # Stop and uninstall service
-tightbeam-daemon version           # Print version
+tightbeam-daemon start                                     # Run daemon in foreground
+tightbeam-daemon restart                                   # Reload config (SIGHUP) or start via service manager
+tightbeam-daemon init                                      # Install as system service (systemd/launchd)
+tightbeam-daemon init --uninstall                          # Remove system service
+tightbeam-daemon status                                    # Show running state, connected agents
+tightbeam-daemon show <agent>                              # Print active profile for an agent
+tightbeam-daemon logs <agent>                              # Print conversation log
+tightbeam-daemon send <agent> <message>                    # Send a message to an agent
+tightbeam-daemon send <agent> <message> --file photo.png   # Send with an image
+tightbeam-daemon send <agent> <message> --no-wait          # Send without waiting for response
+tightbeam-daemon stop                                      # Stop and uninstall service
+tightbeam-daemon version                                   # Print version
 ```
+
+`restart` sends SIGHUP to a running daemon, which reloads all agent profiles from disk without dropping connections. If the daemon isn't running, it starts it via the system service manager.
 
 ### Runtime
 
@@ -289,6 +293,36 @@ Response (no runtime connected):
 {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "runtime not connected"}}
 ```
 
+### File Transfer
+
+The `send` request supports image delivery via a multi-frame protocol. The content array includes `file_incoming` blocks alongside text, followed by one raw-byte frame per file.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "send",
+  "params": {
+    "content": [
+      {"type": "text", "text": "Describe this image"},
+      {"type": "file_incoming", "filename": "photo.png", "mime_type": "image/png", "size": 102400}
+    ]
+  }
+}
+```
+
+The daemon validates all `file_incoming` blocks, then writes the RPC response (`delivered`/`queued`) **before** reading any file frames. The CLI reads the response before sending file data. This ordering prevents deadlock.
+
+Each file frame uses the same 4-byte BE u32 length prefix as JSON frames, but the payload is raw bytes (not JSON). Frames are sent in the same order as their `file_incoming` blocks in the content array.
+
+The daemon base64-encodes each file and replaces the `file_incoming` block with an `image` block before delivering to the runtime:
+
+```json
+{"type": "image", "media_type": "image/png", "data": "<base64>"}
+```
+
+v1 supports: `image/png`, `image/jpeg`, `image/gif`, `image/webp`. Unsupported MIME types are rejected with an error response. Files larger than 4GB are rejected (framing limit).
+
 ### Subscriber Notifications
 
 After sending a message, the connection becomes a subscriber. Subscribers receive copies of the agent's text output (not tool calls) and lifecycle events:
@@ -373,7 +407,7 @@ When the LLM returns tool calls, the daemon partitions them:
 - **All MCP** — daemon executes them, appends results to conversation, calls the LLM again. The runtime waits and receives the final response.
 - **Mixed** — daemon executes MCP calls immediately, returns only the local calls to the runtime. When the runtime sends back local results, the daemon interleaves all results in the original call order and continues.
 
-MCP connections are lazy (first turn, not startup) and cached for the session. Auth uses Bearer tokens from host environment variables. If a connection drops mid-session, the daemon retries once.
+MCP connections are lazy (first turn, not startup) and cached for the session. Auth uses Bearer tokens from profile configuration. If a connection drops mid-session, the daemon retries once.
 
 ## Conversation Ownership
 
@@ -392,6 +426,7 @@ Tightbeam owns the conversation. The runtime is stateless.
 ```
 ~/.config/tightbeam/
   registry.toml                    # Global LLM/MCP server definitions
+  tightbeam.pid                    # Daemon PID (for SIGHUP reload)
   agents/
     my-agent.toml                  # Per-agent profile
   sockets/
