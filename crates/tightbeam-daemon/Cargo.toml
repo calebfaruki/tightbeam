@@ -14,7 +14,7 @@ tightbeam-protocol = { path = "../tightbeam-protocol" }
 tightbeam-providers = { path = "../tightbeam-providers" }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-toml = "0.8"
+toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
