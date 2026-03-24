@@ -1523,4 +1523,292 @@ mod send_integration {
         let _ = std::fs::remove_dir_all(&logs);
         let _ = std::fs::remove_file(&sock);
     }
+
+    #[tokio::test]
+    async fn send_with_image_delivers_image_block() {
+        let sock = test_socket_path("send-img");
+        let logs = test_logs_dir("send-img");
+
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::ContentDelta {
+                text: "I see an image".into(),
+            },
+            StreamEvent::Done {
+                stop_reason: "end_turn".into(),
+            },
+        ]]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+
+        // Send RPC with text + file_incoming
+        let rpc = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "send",
+            "params": {
+                "content": [
+                    {"type": "text", "text": "Describe this"},
+                    {"type": "file_incoming", "filename": "test.png", "mime_type": "image/png", "size": 4}
+                ]
+            }
+        });
+        write_frame(&mut sub_writer, &serde_json::to_vec(&rpc).unwrap())
+            .await
+            .unwrap();
+
+        // Read response BEFORE sending file frame
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        // Send file frame (4 bytes of fake PNG data)
+        tightbeam_protocol::framing::write_frame_header(&mut sub_writer, 4)
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut sub_writer, b"\x89PNG")
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::flush(&mut sub_writer)
+            .await
+            .unwrap();
+
+        // Runtime receives human_message with Image block (not FileIncoming)
+        let human = read_one_frame(&mut rt_reader).await;
+        assert_eq!(human["method"], "human_message");
+        let content = human["params"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["media_type"], "image/png");
+
+        // Verify base64 round-trip
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(content[1]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, b"\x89PNG");
+
+        // Complete the turn
+        let turn = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Describe this"}]}]}}"#;
+        write_frame(&mut rt_writer, turn.as_bytes()).await.unwrap();
+
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                break;
+            }
+        }
+        loop {
+            let frame = read_one_frame(&mut sub_reader).await;
+            if frame["method"] == "end_turn" {
+                break;
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn send_rejects_unsupported_file_type() {
+        let sock = test_socket_path("send-badmime");
+        let logs = test_logs_dir("send-badmime");
+
+        let provider = MockProvider::new(vec![]);
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (_rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+
+        let rpc = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "send",
+            "params": {
+                "content": [
+                    {"type": "file_incoming", "filename": "data.csv", "mime_type": "text/csv", "size": 100}
+                ]
+            }
+        });
+        write_frame(&mut sub_writer, &serde_json::to_vec(&rpc).unwrap())
+            .await
+            .unwrap();
+
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert!(resp.get("error").is_some(), "should reject: {resp}");
+        let msg = resp["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("unsupported file type"), "got: {msg}");
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn send_with_multiple_images_preserves_order() {
+        let sock = test_socket_path("send-multiimg");
+        let logs = test_logs_dir("send-multiimg");
+
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::ContentDelta {
+                text: "Two images".into(),
+            },
+            StreamEvent::Done {
+                stop_reason: "end_turn".into(),
+            },
+        ]]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+
+        let rpc = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "send",
+            "params": {
+                "content": [
+                    {"type": "text", "text": "Compare these"},
+                    {"type": "file_incoming", "filename": "a.png", "mime_type": "image/png", "size": 3},
+                    {"type": "file_incoming", "filename": "b.jpg", "mime_type": "image/jpeg", "size": 5}
+                ]
+            }
+        });
+        write_frame(&mut sub_writer, &serde_json::to_vec(&rpc).unwrap())
+            .await
+            .unwrap();
+
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        // Send two file frames in order
+        tightbeam_protocol::framing::write_frame_header(&mut sub_writer, 3)
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut sub_writer, b"AAA")
+            .await
+            .unwrap();
+        tightbeam_protocol::framing::write_frame_header(&mut sub_writer, 5)
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut sub_writer, b"BBBBB")
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::flush(&mut sub_writer)
+            .await
+            .unwrap();
+
+        // Runtime receives human_message with correct ordering
+        let human = read_one_frame(&mut rt_reader).await;
+        assert_eq!(human["method"], "human_message");
+        let content = human["params"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Compare these");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["media_type"], "image/png");
+        assert_eq!(content[2]["type"], "image");
+        assert_eq!(content[2]["media_type"], "image/jpeg");
+
+        use base64::Engine;
+        let decoded1 = base64::engine::general_purpose::STANDARD
+            .decode(content[1]["data"].as_str().unwrap())
+            .unwrap();
+        let decoded2 = base64::engine::general_purpose::STANDARD
+            .decode(content[2]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded1, b"AAA", "first image should be AAA");
+        assert_eq!(decoded2, b"BBBBB", "second image should be BBBBB");
+
+        // Complete turn
+        let turn = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Compare these"}]}]}}"#;
+        write_frame(&mut rt_writer, turn.as_bytes()).await.unwrap();
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                break;
+            }
+        }
+        loop {
+            let frame = read_one_frame(&mut sub_reader).await;
+            if frame["method"] == "end_turn" {
+                break;
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn text_only_send_unaffected_by_file_support() {
+        let sock = test_socket_path("send-textonly2");
+        let logs = test_logs_dir("send-textonly2");
+
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::ContentDelta {
+                text: "Hello".into(),
+            },
+            StreamEvent::Done {
+                stop_reason: "end_turn".into(),
+            },
+        ]]);
+
+        let _handle = start_daemon(&sock, provider, logs.clone()).await;
+        tokio::time::sleep(WAIT).await;
+
+        let rt_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut rt_reader, mut rt_writer) = rt_stream.into_split();
+        send_register(&mut rt_writer).await;
+        tokio::time::sleep(WAIT).await;
+
+        let sub_stream = UnixStream::connect(&sock).await.unwrap();
+        let (mut sub_reader, mut sub_writer) = sub_stream.into_split();
+        send_rpc_frame(&mut sub_writer, 1, "Just text").await;
+
+        let resp = read_one_frame(&mut sub_reader).await;
+        assert_eq!(resp["result"]["status"], "delivered");
+
+        let human = read_one_frame(&mut rt_reader).await;
+        assert_eq!(human["params"]["content"][0]["type"], "text");
+
+        let turn = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Just text"}]}]}}"#;
+        write_frame(&mut rt_writer, turn.as_bytes()).await.unwrap();
+
+        loop {
+            let frame = read_one_frame(&mut rt_reader).await;
+            if frame.get("id").is_some() {
+                break;
+            }
+        }
+        loop {
+            let frame = read_one_frame(&mut sub_reader).await;
+            if frame["method"] == "end_turn" {
+                break;
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&logs);
+        let _ = std::fs::remove_file(&sock);
+    }
 }

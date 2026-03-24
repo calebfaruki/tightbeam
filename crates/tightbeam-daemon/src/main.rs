@@ -165,24 +165,106 @@ fn status_command() {
     }
 }
 
+fn mime_from_extension(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
 async fn send_command(args: &[String]) -> Result<(), String> {
     if args.len() < 2 {
-        return Err("usage: tightbeam-daemon send <agent> <message>".into());
+        return Err(
+            "usage: tightbeam-daemon send <agent> <message> [--file path] [--no-wait]".into(),
+        );
     }
 
     let agent = &args[0];
-    let no_wait = args.iter().any(|a| a == "--no-wait");
-    let message: String = args[1..]
-        .iter()
-        .filter(|a| a.as_str() != "--no-wait")
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut no_wait = false;
+    let mut file_paths: Vec<PathBuf> = Vec::new();
+    let mut message_parts: Vec<String> = Vec::new();
 
-    if message.is_empty() {
-        return Err("usage: tightbeam-daemon send <agent> <message>".into());
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--no-wait" => no_wait = true,
+            "--file" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--file requires a path argument".into());
+                }
+                file_paths.push(PathBuf::from(&args[i]));
+            }
+            other => message_parts.push(other.to_string()),
+        }
+        i += 1;
     }
 
+    let message = message_parts.join(" ");
+    if message.is_empty() && file_paths.is_empty() {
+        return Err(
+            "usage: tightbeam-daemon send <agent> <message> [--file path] [--no-wait]".into(),
+        );
+    }
+
+    // Build content array
+    let mut content: Vec<serde_json::Value> = Vec::new();
+    if !message.is_empty() {
+        content.push(serde_json::json!({"type": "text", "text": message}));
+    }
+
+    // Validate files and add FileIncoming blocks
+    struct FileInfo {
+        path: PathBuf,
+        size: u64,
+    }
+    let mut files: Vec<FileInfo> = Vec::new();
+
+    for path in &file_paths {
+        let meta = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+        let size = meta.len();
+
+        if size > u32::MAX as u64 {
+            return Err(format!(
+                "'{}' is too large ({} bytes, max {})",
+                path.display(),
+                size,
+                u32::MAX
+            ));
+        }
+
+        let mime = mime_from_extension(path).ok_or_else(|| {
+            format!(
+                "unsupported file type: '{}' (v1 supports png, jpg, gif, webp)",
+                path.display()
+            )
+        })?;
+
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        content.push(serde_json::json!({
+            "type": "file_incoming",
+            "filename": filename,
+            "mime_type": mime,
+            "size": size
+        }));
+
+        files.push(FileInfo {
+            path: path.clone(),
+            size,
+        });
+    }
+
+    // Connect and send Frame 1 (JSON RPC)
     let sock_path = sockets_dir().join(format!("{agent}.sock"));
     let stream = UnixStream::connect(&sock_path)
         .await
@@ -193,13 +275,68 @@ async fn send_command(args: &[String]) -> Result<(), String> {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "send",
-        "params": {"content": [{"type": "text", "text": message}]}
+        "params": {"content": content}
     });
     let payload = serde_json::to_vec(&rpc).map_err(|e| format!("serialize error: {e}"))?;
     write_frame(&mut writer, &payload)
         .await
         .map_err(|e| format!("write error: {e}"))?;
 
+    // Read RPC response before sending file frames
+    let resp_frame = read_frame(&mut reader)
+        .await
+        .map_err(|e| format!("read error: {e}"))?
+        .ok_or("daemon disconnected")?;
+    let resp: serde_json::Value =
+        serde_json::from_slice(&resp_frame).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    if let Some(error) = resp.get("error") {
+        let msg = error["message"].as_str().unwrap_or("unknown error");
+        return Err(msg.to_string());
+    }
+
+    if no_wait && files.is_empty() {
+        return Ok(());
+    }
+
+    // Send file frames (after response confirms acceptance)
+    for file_info in &files {
+        use tightbeam_protocol::framing::write_frame_header;
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(&file_info.path)
+            .await
+            .map_err(|e| format!("cannot open '{}': {e}", file_info.path.display()))?;
+
+        write_frame_header(&mut writer, file_info.size as u32)
+            .await
+            .map_err(|e| format!("write error: {e}"))?;
+
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("read error: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            tokio::io::AsyncWriteExt::write_all(&mut writer, &buf[..n])
+                .await
+                .map_err(|e| format!("write error: {e}"))?;
+        }
+    }
+    if !files.is_empty() {
+        tokio::io::AsyncWriteExt::flush(&mut writer)
+            .await
+            .map_err(|e| format!("flush error: {e}"))?;
+    }
+
+    if no_wait {
+        return Ok(());
+    }
+
+    // Read subscriber notifications
     loop {
         let frame = read_frame(&mut reader)
             .await
@@ -209,15 +346,7 @@ async fn send_command(args: &[String]) -> Result<(), String> {
         let value: serde_json::Value =
             serde_json::from_str(&raw).map_err(|e| format!("invalid JSON: {e}"))?;
 
-        if value.get("id").is_some() {
-            if let Some(error) = value.get("error") {
-                let msg = error["message"].as_str().unwrap_or("unknown error");
-                return Err(msg.to_string());
-            }
-            if no_wait {
-                return Ok(());
-            }
-        } else if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
+        if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
             match method {
                 "delivered" => {}
                 "end_turn" => {

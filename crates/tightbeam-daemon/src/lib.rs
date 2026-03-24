@@ -658,6 +658,42 @@ async fn handle_send_connection(
         }
     };
 
+    let mut content = params.content;
+    let file_indices = tightbeam_protocol::file_incoming_indices(&content);
+
+    // Validate all file_incoming blocks before responding
+    for &idx in &file_indices {
+        if let ContentBlock::FileIncoming {
+            mime_type, size, ..
+        } = &content[idx]
+        {
+            if !tightbeam_protocol::is_supported_image(mime_type) {
+                let mut w = writer;
+                write_framed_json(
+                    &mut w,
+                    &build_error(
+                        id,
+                        -32602,
+                        format!(
+                            "unsupported file type: {mime_type} (v1 supports png, jpg, gif, webp)"
+                        ),
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+            if *size > u32::MAX as u64 {
+                let mut w = writer;
+                write_framed_json(
+                    &mut w,
+                    &build_error(id, -32602, "file too large (max 4GB)".into()),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+
     let sub_handle: SubscriberWriter = Arc::new(TokioMutex::new(writer));
     let (delivered_tx, delivered_rx) = oneshot::channel();
 
@@ -670,18 +706,40 @@ async fn handle_send_connection(
         busy
     };
 
+    // Write RPC response BEFORE reading file frames (deadlock prevention)
+    if was_busy {
+        let mut w = sub_handle.lock().await;
+        write_framed_json(&mut *w, &build_send_response(id, "queued")).await?;
+    } else {
+        let mut w = sub_handle.lock().await;
+        write_framed_json(&mut *w, &build_send_response(id, "delivered")).await?;
+    }
+
+    // Read file frames and base64-encode (after response is written)
+    for &idx in &file_indices {
+        let mime_type = match &content[idx] {
+            ContentBlock::FileIncoming { mime_type, .. } => mime_type.clone(),
+            _ => unreachable!(),
+        };
+
+        let frame_len = tightbeam_protocol::framing::read_frame_header(&mut reader).await?;
+        let mut raw_bytes = vec![0u8; frame_len as usize];
+        tokio::io::AsyncReadExt::read_exact(&mut reader, &mut raw_bytes).await?;
+
+        use base64::Engine;
+        let base64_data = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+        content[idx] = ContentBlock::image(&mime_type, &base64_data);
+    }
+
+    // Build delivery AFTER file processing (partial failure safety)
     let delivery = HumanMessageDelivery {
-        content: params.content,
+        content,
         subscriber: Some(sub_handle.clone()),
         delivered_tx: Some(delivered_tx),
     };
 
     if was_busy {
         agent_state.lock().await.queue.push_back(delivery);
-        {
-            let mut w = sub_handle.lock().await;
-            write_framed_json(&mut *w, &build_send_response(id, "queued")).await?;
-        }
     } else if sender.send(delivery).await.is_err() {
         let mut state = agent_state.lock().await;
         state.busy = false;
@@ -692,9 +750,6 @@ async fn handle_send_connection(
         )
         .await?;
         return Ok(());
-    } else {
-        let mut w = sub_handle.lock().await;
-        write_framed_json(&mut *w, &build_send_response(id, "delivered")).await?;
     }
 
     if was_busy {

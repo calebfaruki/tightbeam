@@ -24,54 +24,36 @@ impl ClaudeProvider {
     }
 }
 
-// Translates internal Message types to Claude API format.
-// NOTE: ContentBlock currently only has Text. Phase 3 will add file_incoming blocks
-// which don't map to any Claude API content type. This function will need explicit
-// handling to convert them (e.g., base64 images → image content blocks) or filter them.
+fn content_block_to_api(block: &ContentBlock) -> serde_json::Value {
+    match block {
+        ContentBlock::Text { text } => serde_json::json!({
+            "type": "text",
+            "text": text,
+        }),
+        ContentBlock::Image { media_type, data } => serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            }
+        }),
+        ContentBlock::FileIncoming { .. } => {
+            panic!("FileIncoming must be replaced before reaching provider")
+        }
+    }
+}
+
 fn build_api_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     messages
         .iter()
         .map(|m| {
             let mut obj = serde_json::Map::new();
-            obj.insert("role".into(), serde_json::Value::String(m.role.clone()));
-
-            if let Some(ref blocks) = m.content {
-                let value = serde_json::to_value(blocks).unwrap_or(serde_json::Value::Null);
-                obj.insert("content".into(), value);
-            }
-
-            if let Some(ref tool_calls) = m.tool_calls {
-                let mut content_blocks: Vec<serde_json::Value> = Vec::new();
-
-                if let Some(ref blocks) = m.content {
-                    for block in blocks {
-                        let ContentBlock::Text { text } = block;
-                        content_blocks.push(serde_json::json!({
-                            "type": "text",
-                            "text": text,
-                        }));
-                    }
-                }
-
-                for tc in tool_calls {
-                    content_blocks.push(serde_json::json!({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.input,
-                    }));
-                }
-
-                obj.insert("content".into(), serde_json::Value::Array(content_blocks));
-            }
 
             if m.role == "tool" {
+                obj.insert("role".into(), "user".into());
                 if let Some(ref tool_call_id) = m.tool_call_id {
-                    obj.remove("role");
-                    obj.insert("role".into(), serde_json::Value::String("user".into()));
-
                     let text = content_text(&m.content).unwrap_or("").to_string();
-
                     obj.insert(
                         "content".into(),
                         serde_json::json!([{
@@ -80,6 +62,31 @@ fn build_api_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                             "content": text,
                         }]),
                     );
+                }
+            } else if let Some(ref tool_calls) = m.tool_calls {
+                obj.insert("role".into(), m.role.clone().into());
+                let mut content_blocks: Vec<serde_json::Value> = m
+                    .content
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(content_block_to_api)
+                    .collect();
+                for tc in tool_calls {
+                    content_blocks.push(serde_json::json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.input,
+                    }));
+                }
+                obj.insert("content".into(), serde_json::Value::Array(content_blocks));
+            } else {
+                obj.insert("role".into(), m.role.clone().into());
+                if let Some(ref blocks) = m.content {
+                    let api_blocks: Vec<serde_json::Value> =
+                        blocks.iter().map(content_block_to_api).collect();
+                    obj.insert("content".into(), serde_json::Value::Array(api_blocks));
                 }
             }
 
@@ -213,6 +220,41 @@ mod claude_api {
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[0]["tool_use_id"], "tc-1");
         assert_eq!(content[0]["content"], "file list here");
+    }
+
+    #[test]
+    fn image_block_converts_to_anthropic_format() {
+        let messages = vec![Message {
+            role: "user".into(),
+            content: Some(vec![
+                ContentBlock::text("Describe this"),
+                ContentBlock::image("image/png", "iVBOR..."),
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: None,
+        }];
+        let api = build_api_messages(&messages);
+        let content = api[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Describe this");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBOR...");
+    }
+
+    #[test]
+    #[should_panic(expected = "FileIncoming must be replaced")]
+    fn file_incoming_panics_in_provider() {
+        let messages = vec![Message {
+            role: "user".into(),
+            content: Some(vec![ContentBlock::file_incoming("f.png", "image/png", 1)]),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: None,
+        }];
+        build_api_messages(&messages);
     }
 
     #[test]

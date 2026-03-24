@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 pub enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "file_incoming")]
+    FileIncoming {
+        filename: String,
+        mime_type: String,
+        size: u64,
+    },
+    #[serde(rename = "image")]
+    Image { media_type: String, data: String },
 }
 
 impl ContentBlock {
@@ -18,11 +26,46 @@ impl ContentBlock {
         vec![Self::text(s)]
     }
 
+    pub fn file_incoming(
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        size: u64,
+    ) -> Self {
+        Self::FileIncoming {
+            filename: filename.into(),
+            mime_type: mime_type.into(),
+            size,
+        }
+    }
+
+    pub fn image(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::Image {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text { text } => Some(text),
+            _ => None,
         }
     }
+}
+
+pub fn file_incoming_indices(blocks: &[ContentBlock]) -> Vec<usize> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| matches!(b, ContentBlock::FileIncoming { .. }).then_some(i))
+        .collect()
+}
+
+pub fn is_supported_image(mime_type: &str) -> bool {
+    matches!(
+        mime_type.to_ascii_lowercase().as_str(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
 }
 
 pub fn content_text(blocks: &Option<Vec<ContentBlock>>) -> Option<&str> {
@@ -401,5 +444,79 @@ mod serialization {
             result.is_err(),
             "old-format plain string content must be rejected"
         );
+    }
+
+    #[test]
+    fn file_incoming_round_trips() {
+        let block = ContentBlock::file_incoming("photo.png", "image/png", 1024);
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains(r#""type":"file_incoming""#));
+        assert!(json.contains(r#""filename":"photo.png""#));
+        assert!(json.contains(r#""mime_type":"image/png""#));
+        assert!(json.contains(r#""size":1024"#));
+
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn image_round_trips() {
+        let block = ContentBlock::image("image/png", "iVBOR...");
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains(r#""type":"image""#));
+        assert!(json.contains(r#""media_type":"image/png""#));
+        assert!(json.contains(r#""data":"iVBOR...""#));
+
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn as_text_returns_none_for_non_text() {
+        let img = ContentBlock::image("image/png", "data");
+        assert_eq!(img.as_text(), None);
+
+        let fi = ContentBlock::file_incoming("f.png", "image/png", 1);
+        assert_eq!(fi.as_text(), None);
+    }
+
+    #[test]
+    fn file_incoming_indices_finds_correct_positions() {
+        let blocks = vec![
+            ContentBlock::text("hello"),
+            ContentBlock::file_incoming("a.png", "image/png", 100),
+            ContentBlock::text("world"),
+            ContentBlock::file_incoming("b.jpg", "image/jpeg", 200),
+        ];
+        assert_eq!(file_incoming_indices(&blocks), vec![1, 3]);
+    }
+
+    #[test]
+    fn file_incoming_indices_empty_when_none() {
+        let blocks = vec![ContentBlock::text("hello")];
+        assert!(file_incoming_indices(&blocks).is_empty());
+        assert!(file_incoming_indices(&[]).is_empty());
+    }
+
+    #[test]
+    fn is_supported_image_accepts_valid_types() {
+        assert!(is_supported_image("image/png"));
+        assert!(is_supported_image("image/jpeg"));
+        assert!(is_supported_image("image/gif"));
+        assert!(is_supported_image("image/webp"));
+    }
+
+    #[test]
+    fn is_supported_image_case_insensitive() {
+        assert!(is_supported_image("Image/PNG"));
+        assert!(is_supported_image("IMAGE/JPEG"));
+    }
+
+    #[test]
+    fn is_supported_image_rejects_non_images() {
+        assert!(!is_supported_image("application/pdf"));
+        assert!(!is_supported_image("text/plain"));
+        assert!(!is_supported_image("image/svg+xml"));
+        assert!(!is_supported_image(""));
     }
 }

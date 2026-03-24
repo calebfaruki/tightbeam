@@ -25,6 +25,26 @@ pub async fn read_frame(
     Ok(Some(payload))
 }
 
+/// Reads the 4-byte u32 BE length header of a frame.
+/// Use with manual payload reads for streaming large binary data.
+pub async fn read_frame_header(
+    reader: &mut (impl AsyncReadExt + Unpin),
+) -> Result<u32, std::io::Error> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf).await?;
+    Ok(u32::from_be_bytes(buf))
+}
+
+/// Writes the 4-byte u32 BE length header of a frame.
+/// Use with manual payload writes for streaming large binary data.
+pub async fn write_frame_header(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    len: u32,
+) -> Result<(), std::io::Error> {
+    writer.write_all(&len.to_be_bytes()).await?;
+    Ok(())
+}
+
 /// Writes a length-prefixed frame: [4-byte u32 BE length][payload].
 pub async fn write_frame(
     writer: &mut (impl AsyncWriteExt + Unpin),
@@ -141,5 +161,21 @@ mod tests {
         // Header read_exact succeeds, but payload read_exact gets UnexpectedEof → Err
         let err = read_frame(&mut reader).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn frame_header_round_trips() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (mut reader, _) = tokio::io::split(server);
+        let (_, mut writer) = tokio::io::split(client);
+
+        write_frame_header(&mut writer, 42).await.unwrap();
+        write_frame_header(&mut writer, 0).await.unwrap();
+        write_frame_header(&mut writer, 16_777_216).await.unwrap();
+        drop(writer);
+
+        assert_eq!(read_frame_header(&mut reader).await.unwrap(), 42);
+        assert_eq!(read_frame_header(&mut reader).await.unwrap(), 0);
+        assert_eq!(read_frame_header(&mut reader).await.unwrap(), 16_777_216);
     }
 }
