@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam-daemon"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam-protocol"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam-providers"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam-runtime"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",

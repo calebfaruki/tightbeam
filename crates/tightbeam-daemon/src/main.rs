@@ -54,11 +54,9 @@ fn restart_command() {
     // Try SIGHUP if daemon is running
     if let Ok(pid_str) = std::fs::read_to_string(pid_path()) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            if unsafe { libc::kill(pid, 0) } == 0 {
-                if unsafe { libc::kill(pid, libc::SIGHUP) } == 0 {
-                    println!("tightbeam: config reload triggered (pid {pid})");
-                    return;
-                }
+            if unsafe { libc::kill(pid, 0) } == 0 && unsafe { libc::kill(pid, libc::SIGHUP) } == 0 {
+                println!("tightbeam: config reload triggered (pid {pid})");
+                return;
             }
             let _ = std::fs::remove_file(pid_path());
         }
