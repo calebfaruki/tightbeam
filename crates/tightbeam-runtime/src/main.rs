@@ -1,7 +1,10 @@
 mod agent;
 mod config;
 mod connection;
+mod prompt;
 mod tools;
+
+use std::path::Path;
 
 use config::RuntimeConfig;
 
@@ -13,12 +16,12 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("tightbeam-runtime: {e}");
-            eprintln!("usage: tightbeam --system-prompt <path> --tools <list> --socket <path> [--max-iterations <n>] [--max-output-chars <n>]");
+            eprintln!("usage: tightbeam --tools <list> --socket <path> [--max-iterations <n>] [--max-output-chars <n>]");
             std::process::exit(1);
         }
     };
 
-    if let Err(e) = agent::run_agent(config).await {
+    if let Err(e) = agent::run_agent(config, Path::new(config::AGENT_DIR)).await {
         eprintln!("tightbeam-runtime: {e}");
         std::process::exit(1);
     }

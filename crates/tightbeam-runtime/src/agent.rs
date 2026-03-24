@@ -1,17 +1,12 @@
+use std::path::Path;
+
 use crate::config::RuntimeConfig;
 use crate::connection::DaemonConnection;
 use crate::tools;
 use tightbeam_protocol::{ContentBlock, Message, StopReason, TurnRequest};
 
-pub(crate) async fn run_agent(config: RuntimeConfig) -> Result<(), String> {
-    let system_prompt = tokio::fs::read_to_string(&config.system_prompt_path)
-        .await
-        .map_err(|e| {
-            format!(
-                "failed to read system prompt {}: {e}",
-                config.system_prompt_path.display()
-            )
-        })?;
+pub(crate) async fn run_agent(config: RuntimeConfig, agent_dir: &Path) -> Result<(), String> {
+    let system_prompt = crate::prompt::load_system_prompt(agent_dir).await?;
 
     let tool_defs = tools::tool_definitions(&config.tools);
 
@@ -167,8 +162,9 @@ mod agent_tests {
         tempfile::TempDir,
     ) {
         let tmp = tempfile::tempdir().unwrap();
-        let prompt_path = tmp.path().join("prompt.md");
-        std::fs::write(&prompt_path, "You are a test agent.").unwrap();
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("prompt.md"), "You are a test agent.").unwrap();
 
         let sock_dir =
             std::env::temp_dir().join(format!("tb-agent-{}-{}", name, std::process::id()));
@@ -179,14 +175,13 @@ mod agent_tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
         let config = RuntimeConfig {
-            system_prompt_path: prompt_path,
             tools: vec!["bash".into()],
             socket_path: sock_path,
             max_iterations,
             max_output_chars: 30000,
         };
 
-        let agent_handle = tokio::spawn(async move { run_agent(config).await });
+        let agent_handle = tokio::spawn(async move { run_agent(config, &agent_dir).await });
 
         let (stream, _) = listener.accept().await.unwrap();
         let (mut read, write) = stream.into_split();
