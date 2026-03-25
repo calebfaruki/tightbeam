@@ -1,5 +1,4 @@
 pub mod conversation;
-pub mod init;
 pub mod mcp;
 pub mod paths;
 pub mod profile;
@@ -876,7 +875,7 @@ pub async fn run_daemon(
     mcp_managers: McpManagerMap,
     logs_base_dir: PathBuf,
     sockets_dir: PathBuf,
-    agents_path: PathBuf,
+    agents_dir: PathBuf,
 ) {
     let human_msg_senders: HumanMessageSenderMap = Arc::new(RwLock::new(HashMap::new()));
 
@@ -907,7 +906,7 @@ pub async fn run_daemon(
 
     loop {
         sighup.recv().await;
-        match registration::load_agents(&agents_path) {
+        match registration::load_agents(&agents_dir) {
             Ok(new_profiles) => {
                 let old_names: std::collections::HashSet<String> =
                     profiles.read().await.keys().cloned().collect();

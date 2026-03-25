@@ -117,7 +117,7 @@ async fn start_daemon(
 
     let base = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
     let sockets_dir = base.join("sockets");
-    let agents_path = base.join("agents.toml");
+    let agents_dir = base.join("agents");
 
     tokio::spawn(async move {
         run_daemon(
@@ -128,7 +128,7 @@ async fn start_daemon(
             mcp_managers,
             logs_dir,
             sockets_dir,
-            agents_path,
+            agents_dir,
         )
         .await;
     })
@@ -144,7 +144,7 @@ async fn zero_agents_daemon_starts() {
     let logs = test_logs_dir("zero-agents");
     let base = logs.parent().unwrap_or(&logs).to_path_buf();
     let sockets_dir = base.join("sockets");
-    let agents_path = base.join("agents.toml");
+    let agents_dir = base.join("agents");
 
     let handle = tokio::spawn(async move {
         run_daemon(
@@ -155,7 +155,7 @@ async fn zero_agents_daemon_starts() {
             mcp_managers,
             logs,
             sockets_dir,
-            agents_path,
+            agents_dir,
         )
         .await;
     });
@@ -668,7 +668,7 @@ mod mcp_integration {
 
         let base = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
         let sockets_dir = base.join("sockets");
-        let agents_path = base.join("agents.toml");
+        let agents_dir = base.join("agents");
 
         tokio::spawn(async move {
             run_daemon(
@@ -679,7 +679,7 @@ mod mcp_integration {
                 mcp_managers,
                 logs_dir,
                 sockets_dir,
-                agents_path,
+                agents_dir,
             )
             .await;
         })
@@ -1040,6 +1040,111 @@ mod mcp_integration {
         let _ = std::fs::remove_dir_all(&logs);
         let _ = std::fs::remove_file(&sock);
     }
+}
+
+// --- Smoke test: full startup path ---
+
+#[tokio::test]
+async fn smoke_full_startup_path() {
+    let base = tempfile::tempdir().unwrap();
+    let agents_dir = base.path().join("agents");
+    let agent_dir = agents_dir.join("smoke-agent");
+    let sockets_dir = base.path().join("sockets");
+    let logs_dir = base.path().join("logs");
+    let secrets_dir = base.path().join("secrets");
+
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(&sockets_dir).unwrap();
+    std::fs::create_dir_all(&logs_dir).unwrap();
+    std::fs::create_dir_all(&secrets_dir).unwrap();
+
+    let key_path = secrets_dir.join("api_key");
+    std::fs::write(&key_path, "smoke-test-key").unwrap();
+
+    std::fs::write(
+        agent_dir.join("tightbeam.toml"),
+        format!(
+            "[llm]\nprovider = \"anthropic\"\nmodel = \"smoke-model\"\napi_key_file = \"{}\"",
+            key_path.display()
+        ),
+    )
+    .unwrap();
+
+    // Step 1: Directory scanning + secret file reading
+    let configs = tightbeam_daemon::registration::load_agents(&agents_dir).unwrap();
+    assert_eq!(configs.len(), 1);
+    assert!(configs.contains_key("smoke-agent"));
+    assert_eq!(configs["smoke-agent"].llm.api_key, "smoke-test-key");
+    assert_eq!(configs["smoke-agent"].llm.model, "smoke-model");
+
+    // Step 2: Bind socket, start daemon with MockProvider
+    let sock_path = sockets_dir.join("smoke-agent.sock");
+    let listener = bind_agent_socket(&sock_path).unwrap();
+
+    let provider = MockProvider::new(vec![vec![
+        StreamEvent::ContentDelta {
+            text: "Hello from smoke test".into(),
+        },
+        StreamEvent::Done {
+            stop_reason: "end_turn".into(),
+        },
+    ]]);
+
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "smoke-agent".to_string(),
+        configs.into_values().next().unwrap(),
+    );
+    let profiles: ProfileMap = Arc::new(RwLock::new(profiles));
+
+    let mut providers_map: HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> =
+        HashMap::new();
+    providers_map.insert(tightbeam_providers::Provider::Anthropic, Box::new(provider));
+    let providers: ProviderMap = Arc::new(RwLock::new(providers_map));
+
+    let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
+    let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
+
+    let listeners = vec![("smoke-agent".to_string(), listener)];
+
+    let logs = logs_dir.clone();
+    let sockets = sockets_dir.clone();
+    let agents = agents_dir.clone();
+    tokio::spawn(async move {
+        run_daemon(
+            listeners,
+            profiles,
+            conversations,
+            providers,
+            mcp_managers,
+            logs,
+            sockets,
+            agents,
+        )
+        .await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Step 3: Connect, register, send turn, verify response
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_register(&mut writer).await;
+
+    let turn = r#"{"jsonrpc":"2.0","id":1,"method":"turn","params":{"messages":[{"role":"user","content":[{"type":"text","text":"Smoke test"}]}]}}"#;
+    let responses = send_and_read_response(&mut writer, &mut reader, turn).await;
+
+    let final_resp: serde_json::Value = serde_json::from_str(responses.last().unwrap()).unwrap();
+    assert_eq!(final_resp["result"]["stop_reason"], "end_turn");
+
+    let has_content = responses
+        .iter()
+        .any(|r| r.contains("Hello from smoke test"));
+    assert!(
+        has_content,
+        "should contain smoke test output: {responses:?}"
+    );
 }
 
 // --- Send integration tests ---

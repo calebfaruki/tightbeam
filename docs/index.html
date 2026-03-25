@@ -43,12 +43,6 @@
         Proxies LLM API calls from container to host over a unix socket. Credentials stay on the host. The agent sends messages, tightbeam attaches the API key and manages conversation history. The agent never sees the key, the model, or the provider.
       </p>
 
-      <div class="relative group mb-6">
-        <pre class="bg-zinc-900 border border-white/10 px-4 py-3 text-sm overflow-x-auto"><code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/calebfaruki/tightbeam/main/install.sh | sh</code></pre>
-        <button onclick="navigator.clipboard.writeText(document.getElementById('install-cmd').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1500)})"
-          class="absolute top-2 right-2 text-xs text-gray-500 hover:text-white border border-white/10 px-2 py-1 transition-colors">copy</button>
-      </div>
-
       <a href="https://github.com/calebfaruki/tightbeam" class="text-sm text-gray-500 hover:text-white transition-colors">github.com/calebfaruki/tightbeam</a>
     </section>
 
@@ -87,7 +81,7 @@ docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
           </div>
         </div>
         <div class="border border-white/10 sm:border-l-0 bg-zinc-900 px-5 py-4">
-          <div class="text-gray-300 font-medium mb-3">Host</div>
+          <div class="text-gray-300 font-medium mb-3">Daemon</div>
           <div class="text-gray-500 space-y-1">
             <div>tightbeam daemon receives from socket</div>
             <div class="text-gray-600 pl-4">&darr;</div>
@@ -195,26 +189,19 @@ docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
     <section class="mb-20">
       <h2 class="border-b border-white/20 text-lg font-medium mb-6">Quick start</h2>
 
-      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Install</span>
-curl -fsSL https://raw.githubusercontent.com/calebfaruki/tightbeam/main/install.sh | sh
+      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Agent config directory (mounted into daemon container)</span>
+mkdir -p agents/my-agent
 
-<span class="text-gray-600"># Create a registry (LLM providers and MCP servers)</span>
-cat > ~/.config/tightbeam/registry.toml &lt;&lt; 'EOF'
-[llm.claude-sonnet]
+<span class="text-gray-600"># Agent config — LLM provider + secret file path</span>
+cat > agents/my-agent/tightbeam.toml &lt;&lt; 'EOF'
+[llm]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key_file = "/run/secrets/anthropic_api_key"
 EOF
 
-<span class="text-gray-600"># Create an agent profile</span>
-cat > ~/.config/tightbeam/agents/my-agent.toml &lt;&lt; 'EOF'
-[llm.claude-sonnet]
-EOF
-
-<span class="text-gray-600"># Run your container</span>
-docker run \
-  -v ~/.config/tightbeam/sockets/my-agent.sock:/run/docker-tightbeam.sock \
-  your-agent-image</pre>
+<span class="text-gray-600"># Daemon discovers agents by scanning --agents-dir</span>
+<span class="text-gray-600"># Docker Compose or Helm mounts configs and secrets into the daemon container</span></pre>
     </section>
 
     <!-- Security -->
