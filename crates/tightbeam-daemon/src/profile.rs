@@ -116,9 +116,8 @@ fn resolve_credential(
         return Ok(val.to_string());
     }
     if let Some(name) = env_name {
-        return env_resolver(name).ok_or_else(|| {
-            format!("env var '{name}' not set (required by {field_name}_env)")
-        });
+        return env_resolver(name)
+            .ok_or_else(|| format!("env var '{name}' not set (required by {field_name}_env)"));
     }
     Err(format!(
         "must have either '{field_name}' or '{field_name}_env'"
@@ -178,17 +177,16 @@ impl AgentProfile {
             .get(&llm_key)
             .ok_or_else(|| format!("unknown llm registry key: {llm_key}"))?;
 
-        let api_key =
-            if llm_override.api_key.is_some() || llm_override.api_key_env.is_some() {
-                resolve_credential(
-                    llm_override.api_key.as_deref(),
-                    llm_override.api_key_env.as_deref(),
-                    "api_key",
-                    env_resolver,
-                )?
-            } else {
-                registry_llm.resolve_api_key(env_resolver)?
-            };
+        let api_key = if llm_override.api_key.is_some() || llm_override.api_key_env.is_some() {
+            resolve_credential(
+                llm_override.api_key.as_deref(),
+                llm_override.api_key_env.as_deref(),
+                "api_key",
+                env_resolver,
+            )?
+        } else {
+            registry_llm.resolve_api_key(env_resolver)?
+        };
 
         let llm = ResolvedLlm {
             provider: llm_override
@@ -211,18 +209,17 @@ impl AgentProfile {
                 .get(&mcp_key)
                 .ok_or_else(|| format!("unknown mcp registry key: {mcp_key}"))?;
 
-            let auth_token = if mcp_override.auth_token.is_some()
-                || mcp_override.auth_token_env.is_some()
-            {
-                resolve_credential(
-                    mcp_override.auth_token.as_deref(),
-                    mcp_override.auth_token_env.as_deref(),
-                    "auth_token",
-                    env_resolver,
-                )?
-            } else {
-                registry_mcp.resolve_auth_token(env_resolver)?
-            };
+            let auth_token =
+                if mcp_override.auth_token.is_some() || mcp_override.auth_token_env.is_some() {
+                    resolve_credential(
+                        mcp_override.auth_token.as_deref(),
+                        mcp_override.auth_token_env.as_deref(),
+                        "auth_token",
+                        env_resolver,
+                    )?
+                } else {
+                    registry_mcp.resolve_auth_token(env_resolver)?
+                };
 
             mcp_servers.push(ResolvedMcp {
                 name: mcp_key,
@@ -549,7 +546,11 @@ mod credential_resolution {
     }
 
     fn env_with<'a>(map: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |name| map.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+        move |name| {
+            map.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_string())
+        }
     }
 
     // --- resolve_credential ---
@@ -557,8 +558,7 @@ mod credential_resolution {
     #[test]
     fn literal_wins_over_env() {
         let env = env_with(&[("MY_KEY", "from-env")]);
-        let result =
-            resolve_credential(Some("literal"), Some("MY_KEY"), "api_key", &env).unwrap();
+        let result = resolve_credential(Some("literal"), Some("MY_KEY"), "api_key", &env).unwrap();
         assert_eq!(result, "literal");
     }
 
@@ -660,18 +660,26 @@ mod credential_resolution {
 
     fn env_registry() -> Registry {
         Registry {
-            llm: [("claude".into(), RegistryLlm {
-                provider: tightbeam_providers::Provider::Anthropic,
-                model: "claude-sonnet".into(),
-                api_key: Some("registry-key".into()),
-                api_key_env: None,
-                max_tokens: None,
-            })].into(),
-            mcp: [("gh".into(), RegistryMcp {
-                url: "http://gh".into(),
-                auth_token: Some("registry-token".into()),
-                auth_token_env: None,
-            })].into(),
+            llm: [(
+                "claude".into(),
+                RegistryLlm {
+                    provider: tightbeam_providers::Provider::Anthropic,
+                    model: "claude-sonnet".into(),
+                    api_key: Some("registry-key".into()),
+                    api_key_env: None,
+                    max_tokens: None,
+                },
+            )]
+            .into(),
+            mcp: [(
+                "gh".into(),
+                RegistryMcp {
+                    url: "http://gh".into(),
+                    auth_token: Some("registry-token".into()),
+                    auth_token_env: None,
+                },
+            )]
+            .into(),
         }
     }
 
@@ -730,20 +738,31 @@ auth_token_env = "AGENT_TOKEN"
     #[test]
     fn full_profile_resolution_with_env_vars() {
         let reg = Registry {
-            llm: [("claude".into(), RegistryLlm {
-                provider: tightbeam_providers::Provider::Anthropic,
-                model: "claude-sonnet".into(),
-                api_key: None,
-                api_key_env: Some("REG_API_KEY".into()),
-                max_tokens: Some(4096),
-            })].into(),
-            mcp: [("gh".into(), RegistryMcp {
-                url: "http://gh".into(),
-                auth_token: None,
-                auth_token_env: Some("REG_GH_TOKEN".into()),
-            })].into(),
+            llm: [(
+                "claude".into(),
+                RegistryLlm {
+                    provider: tightbeam_providers::Provider::Anthropic,
+                    model: "claude-sonnet".into(),
+                    api_key: None,
+                    api_key_env: Some("REG_API_KEY".into()),
+                    max_tokens: Some(4096),
+                },
+            )]
+            .into(),
+            mcp: [(
+                "gh".into(),
+                RegistryMcp {
+                    url: "http://gh".into(),
+                    auth_token: None,
+                    auth_token_env: Some("REG_GH_TOKEN".into()),
+                },
+            )]
+            .into(),
         };
-        let env = env_with(&[("REG_API_KEY", "resolved-api"), ("REG_GH_TOKEN", "resolved-gh")]);
+        let env = env_with(&[
+            ("REG_API_KEY", "resolved-api"),
+            ("REG_GH_TOKEN", "resolved-gh"),
+        ]);
         let toml = "[llm.claude]\n[mcp.gh]\n";
         let profile = AgentProfile::resolve(toml, &reg, &env).unwrap();
         assert_eq!(profile.llm.api_key, "resolved-api");

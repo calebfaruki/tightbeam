@@ -23,21 +23,42 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: tightbeam-daemon-darwin-arm64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: tightbeam-daemon-linux-musl-amd64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: tightbeam-daemon-linux-musl-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@d1565eeb874f106d1696ad08faf835331133fe14 # stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
       - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: startsWith(matrix.target, 'aarch64-unknown-linux')
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          if [[ "${{ matrix.target }}" == *musl* ]]; then
+            sudo apt-get install -y musl-dev
+            echo '[target.aarch64-unknown-linux-musl]' >> ~/.cargo/config.toml
+          else
+            echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          fi
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p tightbeam-daemon
+        run: |
+          if [[ "${{ matrix.target }}" == *musl* ]]; then
+            RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p tightbeam-daemon
+          else
+            cargo build --release --target ${{ matrix.target }} -p tightbeam-daemon
+          fi
       - name: Rename artifact
         run: cp target/${{ matrix.target }}/release/tightbeam-daemon ${{ matrix.artifact }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -50,9 +71,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            artifact: tightbeam-runtime-linux-amd64
+            artifact: tightbeam-runtime-linux-musl-amd64
           - target: aarch64-unknown-linux-musl
-            artifact: tightbeam-runtime-linux-arm64
+            artifact: tightbeam-runtime-linux-musl-arm64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -85,9 +106,10 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v4.1.0
+      - uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
@@ -96,10 +118,76 @@ jobs:
         run: |
           for f in artifacts/*; do
             cosign sign-blob --yes "$f" \
+              --output-signature "$f.sig" \
               --bundle "$f.bundle"
           done
+      - uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: |
+            artifacts/tightbeam-daemon-*
+            artifacts/tightbeam-runtime-*
       - name: Create release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           files: artifacts/*
           generate_release_notes: true
+
+  publish-daemon-image:
+    needs: [build-daemon]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: artifacts
+          file: Dockerfile.daemon
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/tightbeam-daemon:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/tightbeam-daemon:latest
+
+  publish-runtime-image:
+    needs: [build-runtime]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: artifacts
+          file: Dockerfile.runtime
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/tightbeam-runtime:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/tightbeam-runtime:latest

@@ -3,8 +3,8 @@ pub mod init;
 pub mod mcp;
 pub mod paths;
 pub mod profile;
-pub mod registration;
 pub mod protocol;
+pub mod registration;
 
 use conversation::ConversationLog;
 use mcp::McpManager;
@@ -954,10 +954,10 @@ pub async fn run_daemon(
                     let sock_path = sockets_dir.join(format!("{name}.sock"));
                     match bind_agent_socket(&sock_path) {
                         Ok(listener) => {
-                            agent_states.write().await.insert(
-                                name.clone(),
-                                Arc::new(TokioMutex::new(AgentState::new())),
-                            );
+                            agent_states
+                                .write()
+                                .await
+                                .insert(name.clone(), Arc::new(TokioMutex::new(AgentState::new())));
                             let handle = spawn_listener(
                                 name.clone(),
                                 listener,
@@ -1146,10 +1146,8 @@ mod tests {
 
     #[test]
     fn diff_unchanged_not_in_either() {
-        let old: std::collections::HashSet<String> =
-            ["keep".into(), "remove".into()].into();
-        let new: std::collections::HashSet<String> =
-            ["keep".into(), "add".into()].into();
+        let old: std::collections::HashSet<String> = ["keep".into(), "remove".into()].into();
+        let new: std::collections::HashSet<String> = ["keep".into(), "add".into()].into();
         let (mut added, mut removed) = diff_agent_sets(&old, &new);
         added.sort();
         removed.sort();
@@ -1170,10 +1168,10 @@ mod tests {
             .write()
             .await
             .insert("test".into(), Arc::new(TokioMutex::new(AgentState::new())));
-        conversations
-            .write()
-            .await
-            .insert("test".into(), conversation::ConversationLog::new(std::path::Path::new("/tmp")));
+        conversations.write().await.insert(
+            "test".into(),
+            conversation::ConversationLog::new(std::path::Path::new("/tmp")),
+        );
         mcp_managers
             .write()
             .await

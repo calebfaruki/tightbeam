@@ -165,7 +165,10 @@ async fn zero_agents_daemon_starts() {
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(!handle.is_finished(), "daemon should still be running with zero agents");
+    assert!(
+        !handle.is_finished(),
+        "daemon should still be running with zero agents"
+    );
     handle.abort();
     let _ = std::fs::remove_dir_all(test_logs_dir("zero-agents"));
 }

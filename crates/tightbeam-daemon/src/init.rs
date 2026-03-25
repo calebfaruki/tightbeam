@@ -402,10 +402,8 @@ mod idempotent_setup {
 
     #[test]
     fn init_does_not_overwrite_existing_agents_file() {
-        let base = std::env::temp_dir().join(format!(
-            "tightbeam-init-nooverwrite-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("tightbeam-init-nooverwrite-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let config = temp_config(&base);
 

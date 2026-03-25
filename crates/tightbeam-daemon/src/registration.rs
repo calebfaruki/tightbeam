@@ -37,7 +37,7 @@ struct AgentEntry {
     path: String,
 }
 
-pub(crate) fn parse_registration(toml_str: &str) -> Result<Vec<AgentRegistration>, String> {
+pub fn parse_registration(toml_str: &str) -> Result<Vec<AgentRegistration>, String> {
     let table: HashMap<String, AgentEntry> =
         toml::from_str(toml_str).map_err(|e| format!("invalid agents file: {e}"))?;
 
@@ -140,7 +140,10 @@ path = "/home/caleb/agents/deploy-agent"
     #[test]
     fn agent_paths_profile_path() {
         let ap = AgentPaths::new(PathBuf::from("/agents/dev"));
-        assert_eq!(ap.profile_path(), PathBuf::from("/agents/dev/tightbeam.toml"));
+        assert_eq!(
+            ap.profile_path(),
+            PathBuf::from("/agents/dev/tightbeam.toml")
+        );
     }
 
     #[test]
@@ -218,12 +221,7 @@ path = "/m"
     fn load_agents_missing_file_returns_zero() {
         let nonexistent = PathBuf::from("/tmp/tightbeam-test-nonexistent-agents.toml");
         let registry_path = PathBuf::from("/tmp/tightbeam-test-nonexistent-registry.toml");
-        let (_reg, profiles) = load_agents(
-            &nonexistent,
-            &registry_path,
-            &|_| None,
-        )
-        .unwrap();
+        let (_reg, profiles) = load_agents(&nonexistent, &registry_path, &|_| None).unwrap();
         assert!(profiles.is_empty());
     }
 
@@ -234,11 +232,7 @@ path = "/m"
         std::fs::create_dir_all(&base).unwrap();
 
         let agents_toml = base.join("agents.toml");
-        std::fs::write(
-            &agents_toml,
-            "[ghost]\npath = \"/nonexistent/agent/dir\"\n",
-        )
-        .unwrap();
+        std::fs::write(&agents_toml, "[ghost]\npath = \"/nonexistent/agent/dir\"\n").unwrap();
 
         let registry_path = base.join("registry.toml");
         let err = load_agents(&agents_toml, &registry_path, &|_| None).unwrap_err();
@@ -257,11 +251,7 @@ path = "/m"
         // Create agent dir with tightbeam.toml
         let agent_dir = base.join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(
-            agent_dir.join("tightbeam.toml"),
-            "[llm.claude]\n",
-        )
-        .unwrap();
+        std::fs::write(agent_dir.join("tightbeam.toml"), "[llm.claude]\n").unwrap();
 
         // Create agents.toml
         let agents_toml = base.join("agents.toml");
@@ -284,8 +274,7 @@ api_key = "test-key"
         )
         .unwrap();
 
-        let (_reg, profiles) =
-            load_agents(&agents_toml, &registry_path, &|_| None).unwrap();
+        let (_reg, profiles) = load_agents(&agents_toml, &registry_path, &|_| None).unwrap();
         assert_eq!(profiles.len(), 1);
         assert!(profiles.contains_key("my-agent"));
 

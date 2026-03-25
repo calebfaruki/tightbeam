@@ -44,18 +44,18 @@ fn build_daemon_paths(
     args: &[String],
     env_resolver: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ParsedPaths, String> {
-    let config_dir = resolve_flag_or_env(args, "--config-dir", "TIGHTBEAM_CONFIG_DIR", env_resolver);
+    let config_dir =
+        resolve_flag_or_env(args, "--config-dir", "TIGHTBEAM_CONFIG_DIR", env_resolver);
     let sockets_dir =
         resolve_flag_or_env(args, "--sockets-dir", "TIGHTBEAM_SOCKETS_DIR", env_resolver);
     let logs_dir = resolve_flag_or_env(args, "--logs-dir", "TIGHTBEAM_LOGS_DIR", env_resolver);
 
     let daemon = if config_dir.is_some() || sockets_dir.is_some() || logs_dir.is_some() {
-        let config_dir = config_dir
-            .ok_or("--config-dir required with --sockets-dir and --logs-dir")?;
-        let sockets_dir = sockets_dir
-            .ok_or("--sockets-dir required with --config-dir and --logs-dir")?;
-        let logs_dir = logs_dir
-            .ok_or("--logs-dir required with --config-dir and --sockets-dir")?;
+        let config_dir =
+            config_dir.ok_or("--config-dir required with --sockets-dir and --logs-dir")?;
+        let sockets_dir =
+            sockets_dir.ok_or("--sockets-dir required with --config-dir and --logs-dir")?;
+        let logs_dir = logs_dir.ok_or("--logs-dir required with --config-dir and --sockets-dir")?;
         let pid_path = config_dir.join("tightbeam.pid");
         DaemonPaths {
             config_dir,
@@ -100,8 +100,7 @@ fn remove_pid_file(pid_path: &Path) {
 fn restart_command(paths: &DaemonPaths) {
     if let Ok(pid_str) = std::fs::read_to_string(&paths.pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            if unsafe { libc::kill(pid, 0) } == 0 && unsafe { libc::kill(pid, libc::SIGHUP) } == 0
-            {
+            if unsafe { libc::kill(pid, 0) } == 0 && unsafe { libc::kill(pid, libc::SIGHUP) } == 0 {
                 println!("tightbeam: config reload triggered (pid {pid})");
                 return;
             }
@@ -194,35 +193,33 @@ fn logs_command(args: &[String], paths: &DaemonPaths) {
     }
 }
 
-fn status_command(paths: &DaemonPaths) {
-    if !paths.sockets_dir.exists() {
-        println!("tightbeam: not initialized (run 'tightbeam-daemon init')");
+fn status_command(paths: &DaemonPaths, agents_path: &Path) {
+    let registrations = if agents_path.exists() {
+        match registration::load_registration(agents_path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("tightbeam: {e}");
+                return;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    if registrations.is_empty() {
+        println!("tightbeam: no agents registered");
         return;
     }
 
-    let mut agents: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&paths.sockets_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("sock") {
-                if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                    agents.push(name.to_string());
-                }
-            }
-        }
-    }
-    agents.sort();
-
-    if agents.is_empty() {
-        println!("tightbeam: no active agent sockets");
-    } else {
-        println!("tightbeam: {} agent socket(s):", agents.len());
-        for agent in &agents {
-            println!(
-                "  {agent}\t{}",
-                paths.sockets_dir.join(format!("{agent}.sock")).display()
-            );
-        }
+    println!("tightbeam: {} registered agent(s):", registrations.len());
+    for reg in &registrations {
+        let sock_path = paths.sockets_dir.join(format!("{}.sock", reg.name));
+        let status = if sock_path.exists() {
+            "active"
+        } else {
+            "no socket"
+        };
+        println!("  {}\t{}\t{}", reg.name, status, reg.paths.root.display());
     }
 }
 
@@ -236,7 +233,11 @@ fn mime_from_extension(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
-async fn send_command(args: &[String], paths: &DaemonPaths) -> Result<(), String> {
+async fn send_command(
+    args: &[String],
+    paths: &DaemonPaths,
+    agents_path: &Path,
+) -> Result<(), String> {
     if args.is_empty() {
         return Err(
             "usage: tightbeam-daemon send <agent> <message> [--file path] [--no-wait]".into(),
@@ -330,6 +331,19 @@ async fn send_command(args: &[String], paths: &DaemonPaths) -> Result<(), String
             path: path.clone(),
             size,
         });
+    }
+
+    if agents_path.exists() {
+        let content = std::fs::read_to_string(agents_path)
+            .map_err(|e| format!("failed to read agents file: {e}"))?;
+        let registrations = registration::parse_registration(&content)
+            .map_err(|e| format!("invalid agents file: {e}"))?;
+        if !registrations.iter().any(|r| r.name == *agent) {
+            return Err(format!(
+                "agent '{agent}' not found in {}",
+                agents_path.display()
+            ));
+        }
     }
 
     let sock_path = paths.sockets_dir.join(format!("{agent}.sock"));
@@ -437,6 +451,116 @@ async fn send_command(args: &[String], paths: &DaemonPaths) -> Result<(), String
     Ok(())
 }
 
+fn check_command(parsed: &ParsedPaths) {
+    use tightbeam_daemon::profile::Registry;
+
+    if !parsed.agents.exists() {
+        println!("tightbeam: no agents file at {}", parsed.agents.display());
+        return;
+    }
+
+    let registrations = match registration::load_registration(&parsed.agents) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  FAIL agents file: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if registrations.is_empty() {
+        println!("tightbeam: no agents registered");
+        return;
+    }
+
+    let registry = if parsed.registry.exists() {
+        match Registry::load(&parsed.registry) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  FAIL registry: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        Registry::empty()
+    };
+
+    let env_resolver = |name: &str| std::env::var(name).ok();
+    let mut failures = 0;
+    for reg in &registrations {
+        match reg.paths.load_profile(&registry, &env_resolver) {
+            Ok(_) => println!("  ok   {}", reg.name),
+            Err(e) => {
+                eprintln!("  FAIL {}: {e}", reg.name);
+                failures += 1;
+            }
+        }
+    }
+
+    if failures > 0 {
+        eprintln!("tightbeam: {failures} agent(s) failed validation");
+        std::process::exit(1);
+    }
+    println!("tightbeam: all agents valid");
+}
+
+fn doctor_command(parsed: &ParsedPaths) {
+    let mut warnings = 0;
+
+    if parsed.daemon.sockets_dir.exists() {
+        println!(
+            "  ok   sockets directory: {}",
+            parsed.daemon.sockets_dir.display()
+        );
+    } else {
+        eprintln!(
+            "  WARN sockets directory missing: {}",
+            parsed.daemon.sockets_dir.display()
+        );
+        warnings += 1;
+    }
+
+    if parsed.registry.exists() {
+        println!("  ok   registry: {}", parsed.registry.display());
+    } else {
+        eprintln!("  WARN registry missing: {}", parsed.registry.display());
+        warnings += 1;
+    }
+
+    let registrations = if parsed.agents.exists() {
+        println!("  ok   agents file: {}", parsed.agents.display());
+        match registration::load_registration(&parsed.agents) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  FAIL agents file: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        eprintln!("  WARN agents file missing: {}", parsed.agents.display());
+        warnings += 1;
+        Vec::new()
+    };
+
+    for reg in &registrations {
+        let sock = parsed.daemon.sockets_dir.join(format!("{}.sock", reg.name));
+        if sock.exists() {
+            println!("  ok   socket: {}", reg.name);
+        } else {
+            eprintln!(
+                "  WARN socket missing: {} (daemon may not be running)",
+                reg.name
+            );
+            warnings += 1;
+        }
+    }
+
+    if warnings > 0 {
+        println!("tightbeam: {warnings} warning(s)");
+    } else {
+        println!("tightbeam: all checks passed");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
@@ -466,7 +590,7 @@ async fn main() {
             return;
         }
         "status" => {
-            status_command(&parsed.daemon);
+            status_command(&parsed.daemon, &parsed.agents);
             return;
         }
         "show" => {
@@ -490,15 +614,23 @@ async fn main() {
             return;
         }
         "send" => {
-            if let Err(e) = send_command(&args[2..], &parsed.daemon).await {
+            if let Err(e) = send_command(&args[2..], &parsed.daemon, &parsed.agents).await {
                 eprintln!("tightbeam: {e}");
                 std::process::exit(1);
             }
             return;
         }
+        "check" => {
+            check_command(&parsed);
+            return;
+        }
+        "doctor" => {
+            doctor_command(&parsed);
+            return;
+        }
         _ => {
             eprintln!(
-                "usage: tightbeam-daemon <start|restart|stop|init|status|show|logs|send|version>"
+                "usage: tightbeam-daemon <start|restart|stop|init|status|show|logs|send|check|doctor|version>"
             );
             std::process::exit(1);
         }
@@ -517,15 +649,14 @@ async fn main() {
         pid_path,
     } = parsed.daemon;
 
-    let (_registry, profile_map) = registration::load_agents(
-        &parsed.agents,
-        &parsed.registry,
-        &|name| std::env::var(name).ok(),
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("tightbeam: {e}");
-        std::process::exit(1);
-    });
+    let (_registry, profile_map) =
+        registration::load_agents(&parsed.agents, &parsed.registry, &|name| {
+            std::env::var(name).ok()
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("tightbeam: {e}");
+            std::process::exit(1);
+        });
 
     if profile_map.is_empty() {
         tracing::warn!(
@@ -634,9 +765,12 @@ mod path_flag_tests {
     #[test]
     fn all_three_flags_builds_paths() {
         let a = args(&[
-            "--config-dir", "/etc/tb",
-            "--sockets-dir", "/run/tb/sockets",
-            "--logs-dir", "/var/log/tb",
+            "--config-dir",
+            "/etc/tb",
+            "--sockets-dir",
+            "/run/tb/sockets",
+            "--logs-dir",
+            "/var/log/tb",
         ]);
         let p = build_daemon_paths(&a, &no_env).unwrap();
         assert_eq!(p.daemon.config_dir, PathBuf::from("/etc/tb"));
@@ -677,9 +811,12 @@ mod path_flag_tests {
     #[test]
     fn agents_defaults_to_config_dir() {
         let a = args(&[
-            "--config-dir", "/etc/tb",
-            "--sockets-dir", "/run/tb/sockets",
-            "--logs-dir", "/var/log/tb",
+            "--config-dir",
+            "/etc/tb",
+            "--sockets-dir",
+            "/run/tb/sockets",
+            "--logs-dir",
+            "/var/log/tb",
         ]);
         let p = build_daemon_paths(&a, &no_env).unwrap();
         assert_eq!(p.agents, PathBuf::from("/etc/tb/agents.toml"));
@@ -689,10 +826,14 @@ mod path_flag_tests {
     #[test]
     fn agents_flag_overrides_default() {
         let a = args(&[
-            "--config-dir", "/etc/tb",
-            "--sockets-dir", "/run/tb/sockets",
-            "--logs-dir", "/var/log/tb",
-            "--agents", "/custom/agents.toml",
+            "--config-dir",
+            "/etc/tb",
+            "--sockets-dir",
+            "/run/tb/sockets",
+            "--logs-dir",
+            "/var/log/tb",
+            "--agents",
+            "/custom/agents.toml",
         ]);
         let p = build_daemon_paths(&a, &no_env).unwrap();
         assert_eq!(p.agents, PathBuf::from("/custom/agents.toml"));
@@ -708,9 +849,12 @@ mod path_flag_tests {
             _ => None,
         };
         let a = args(&[
-            "--config-dir", "/from-flag",
-            "--sockets-dir", "/from-flag/sockets",
-            "--logs-dir", "/from-flag/logs",
+            "--config-dir",
+            "/from-flag",
+            "--sockets-dir",
+            "/from-flag/sockets",
+            "--logs-dir",
+            "/from-flag/logs",
         ]);
         let p = build_daemon_paths(&a, &env).unwrap();
         assert_eq!(p.daemon.config_dir, PathBuf::from("/from-flag"));
