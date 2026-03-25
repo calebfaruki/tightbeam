@@ -8,7 +8,7 @@ pub mod registration;
 
 use conversation::ConversationLog;
 use mcp::McpManager;
-use profile::AgentProfile;
+use profile::AgentConfig;
 use protocol::{
     build_delivered_notification, build_disconnect_notification, build_end_turn_notification,
     build_error, build_final_response, build_human_message_notification, build_notification,
@@ -30,7 +30,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock};
 
-pub type ProfileMap = Arc<RwLock<HashMap<String, AgentProfile>>>;
+pub type ProfileMap = Arc<RwLock<HashMap<String, AgentConfig>>>;
 pub type ConversationMap = Arc<RwLock<HashMap<String, ConversationLog>>>;
 pub type ProviderMap = Arc<RwLock<HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>>>>;
 pub type McpManagerMap = Arc<RwLock<HashMap<String, McpManager>>>;
@@ -809,7 +809,7 @@ pub async fn cleanup_removed_agent(
 // --- Daemon runner ---
 
 pub fn build_providers(
-    profiles: &HashMap<String, profile::AgentProfile>,
+    profiles: &HashMap<String, profile::AgentConfig>,
 ) -> HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> {
     let mut providers = HashMap::new();
     for profile in profiles.values() {
@@ -877,7 +877,6 @@ pub async fn run_daemon(
     logs_base_dir: PathBuf,
     sockets_dir: PathBuf,
     agents_path: PathBuf,
-    registry_path: PathBuf,
 ) {
     let human_msg_senders: HumanMessageSenderMap = Arc::new(RwLock::new(HashMap::new()));
 
@@ -908,10 +907,8 @@ pub async fn run_daemon(
 
     loop {
         sighup.recv().await;
-        match registration::load_agents(&agents_path, &registry_path, &|name| {
-            std::env::var(name).ok()
-        }) {
-            Ok((_registry, new_profiles)) => {
+        match registration::load_agents(&agents_path) {
+            Ok(new_profiles) => {
                 let old_names: std::collections::HashSet<String> =
                     profiles.read().await.keys().cloned().collect();
                 let new_names: std::collections::HashSet<String> =

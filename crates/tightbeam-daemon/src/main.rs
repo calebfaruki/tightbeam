@@ -21,7 +21,6 @@ use tracing_subscriber::EnvFilter;
 struct ParsedPaths {
     daemon: DaemonPaths,
     agents: PathBuf,
-    registry: PathBuf,
 }
 
 fn resolve_flag_or_env(
@@ -69,14 +68,8 @@ fn build_daemon_paths(
 
     let agents = resolve_flag_or_env(args, "--agents", "TIGHTBEAM_AGENTS", env_resolver)
         .unwrap_or_else(|| daemon.config_dir.join("agents.toml"));
-    let registry = resolve_flag_or_env(args, "--registry", "TIGHTBEAM_REGISTRY", env_resolver)
-        .unwrap_or_else(|| daemon.config_dir.join("registry.toml"));
 
-    Ok(ParsedPaths {
-        daemon,
-        agents,
-        registry,
-    })
+    Ok(ParsedPaths { daemon, agents })
 }
 
 fn parse_path_flags(args: &[String]) -> ParsedPaths {
@@ -452,8 +445,6 @@ async fn send_command(
 }
 
 fn check_command(parsed: &ParsedPaths) {
-    use tightbeam_daemon::profile::Registry;
-
     if !parsed.agents.exists() {
         println!("tightbeam: no agents file at {}", parsed.agents.display());
         return;
@@ -472,22 +463,9 @@ fn check_command(parsed: &ParsedPaths) {
         return;
     }
 
-    let registry = if parsed.registry.exists() {
-        match Registry::load(&parsed.registry) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("  FAIL registry: {e}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        Registry::empty()
-    };
-
-    let env_resolver = |name: &str| std::env::var(name).ok();
     let mut failures = 0;
     for reg in &registrations {
-        match reg.paths.load_profile(&registry, &env_resolver) {
+        match reg.paths.load_profile() {
             Ok(_) => println!("  ok   {}", reg.name),
             Err(e) => {
                 eprintln!("  FAIL {}: {e}", reg.name);
@@ -501,64 +479,6 @@ fn check_command(parsed: &ParsedPaths) {
         std::process::exit(1);
     }
     println!("tightbeam: all agents valid");
-}
-
-fn doctor_command(parsed: &ParsedPaths) {
-    let mut warnings = 0;
-
-    if parsed.daemon.sockets_dir.exists() {
-        println!(
-            "  ok   sockets directory: {}",
-            parsed.daemon.sockets_dir.display()
-        );
-    } else {
-        eprintln!(
-            "  WARN sockets directory missing: {}",
-            parsed.daemon.sockets_dir.display()
-        );
-        warnings += 1;
-    }
-
-    if parsed.registry.exists() {
-        println!("  ok   registry: {}", parsed.registry.display());
-    } else {
-        eprintln!("  WARN registry missing: {}", parsed.registry.display());
-        warnings += 1;
-    }
-
-    let registrations = if parsed.agents.exists() {
-        println!("  ok   agents file: {}", parsed.agents.display());
-        match registration::load_registration(&parsed.agents) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("  FAIL agents file: {e}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        eprintln!("  WARN agents file missing: {}", parsed.agents.display());
-        warnings += 1;
-        Vec::new()
-    };
-
-    for reg in &registrations {
-        let sock = parsed.daemon.sockets_dir.join(format!("{}.sock", reg.name));
-        if sock.exists() {
-            println!("  ok   socket: {}", reg.name);
-        } else {
-            eprintln!(
-                "  WARN socket missing: {} (daemon may not be running)",
-                reg.name
-            );
-            warnings += 1;
-        }
-    }
-
-    if warnings > 0 {
-        println!("tightbeam: {warnings} warning(s)");
-    } else {
-        println!("tightbeam: all checks passed");
-    }
 }
 
 #[tokio::main]
@@ -624,13 +544,9 @@ async fn main() {
             check_command(&parsed);
             return;
         }
-        "doctor" => {
-            doctor_command(&parsed);
-            return;
-        }
         _ => {
             eprintln!(
-                "usage: tightbeam-daemon <start|restart|stop|init|status|show|logs|send|check|doctor|version>"
+                "usage: tightbeam-daemon <start|restart|stop|init|status|show|logs|send|check|version>"
             );
             std::process::exit(1);
         }
@@ -649,14 +565,10 @@ async fn main() {
         pid_path,
     } = parsed.daemon;
 
-    let (_registry, profile_map) =
-        registration::load_agents(&parsed.agents, &parsed.registry, &|name| {
-            std::env::var(name).ok()
-        })
-        .unwrap_or_else(|e| {
-            eprintln!("tightbeam: {e}");
-            std::process::exit(1);
-        });
+    let profile_map = registration::load_agents(&parsed.agents).unwrap_or_else(|e| {
+        eprintln!("tightbeam: {e}");
+        std::process::exit(1);
+    });
 
     if profile_map.is_empty() {
         tracing::warn!(
@@ -743,7 +655,6 @@ async fn main() {
         logs_dir,
         sockets_dir,
         parsed.agents,
-        parsed.registry,
     )
     .await;
 
@@ -820,7 +731,6 @@ mod path_flag_tests {
         ]);
         let p = build_daemon_paths(&a, &no_env).unwrap();
         assert_eq!(p.agents, PathBuf::from("/etc/tb/agents.toml"));
-        assert_eq!(p.registry, PathBuf::from("/etc/tb/registry.toml"));
     }
 
     #[test]
@@ -837,7 +747,6 @@ mod path_flag_tests {
         ]);
         let p = build_daemon_paths(&a, &no_env).unwrap();
         assert_eq!(p.agents, PathBuf::from("/custom/agents.toml"));
-        assert_eq!(p.registry, PathBuf::from("/etc/tb/registry.toml"));
     }
 
     #[test]

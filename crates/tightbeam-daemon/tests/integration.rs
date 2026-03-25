@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tightbeam_daemon::mcp::McpManager;
-use tightbeam_daemon::profile::{AgentProfile, ResolvedLlm, ResolvedMcp};
+use tightbeam_daemon::profile::{AgentConfig, ResolvedLlm, ResolvedMcp};
 use tightbeam_daemon::protocol::{Message, ToolDefinition};
 use tightbeam_daemon::{
     bind_agent_socket, run_daemon, ConversationMap, McpManagerMap, ProfileMap, ProviderMap,
@@ -82,8 +82,8 @@ fn test_logs_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn make_profile() -> AgentProfile {
-    AgentProfile {
+fn make_profile() -> AgentConfig {
+    AgentConfig {
         llm: ResolvedLlm {
             provider: tightbeam_providers::Provider::Anthropic,
             model: "test-model".into(),
@@ -118,7 +118,6 @@ async fn start_daemon(
     let base = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
     let sockets_dir = base.join("sockets");
     let agents_path = base.join("agents.toml");
-    let registry_path = base.join("registry.toml");
 
     tokio::spawn(async move {
         run_daemon(
@@ -130,7 +129,6 @@ async fn start_daemon(
             logs_dir,
             sockets_dir,
             agents_path,
-            registry_path,
         )
         .await;
     })
@@ -147,7 +145,6 @@ async fn zero_agents_daemon_starts() {
     let base = logs.parent().unwrap_or(&logs).to_path_buf();
     let sockets_dir = base.join("sockets");
     let agents_path = base.join("agents.toml");
-    let registry_path = base.join("registry.toml");
 
     let handle = tokio::spawn(async move {
         run_daemon(
@@ -159,7 +156,6 @@ async fn zero_agents_daemon_starts() {
             logs,
             sockets_dir,
             agents_path,
-            registry_path,
         )
         .await;
     });
@@ -673,7 +669,6 @@ mod mcp_integration {
         let base = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
         let sockets_dir = base.join("sockets");
         let agents_path = base.join("agents.toml");
-        let registry_path = base.join("registry.toml");
 
         tokio::spawn(async move {
             run_daemon(
@@ -685,7 +680,6 @@ mod mcp_integration {
                 logs_dir,
                 sockets_dir,
                 agents_path,
-                registry_path,
             )
             .await;
         })

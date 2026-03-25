@@ -1,4 +1,4 @@
-use crate::profile::{AgentProfile, Registry};
+use crate::profile::AgentConfig;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,12 +17,8 @@ impl AgentPaths {
         self.root.join("tightbeam.toml")
     }
 
-    pub fn load_profile(
-        &self,
-        registry: &Registry,
-        env_resolver: &dyn Fn(&str) -> Option<String>,
-    ) -> Result<AgentProfile, String> {
-        AgentProfile::load(&self.profile_path(), registry, env_resolver)
+    pub fn load_profile(&self) -> Result<AgentConfig, String> {
+        AgentConfig::load(&self.profile_path())
     }
 }
 
@@ -74,26 +70,17 @@ pub(crate) fn validate_registration(registrations: &[AgentRegistration]) -> Resu
     Ok(())
 }
 
-pub fn load_agents(
-    agents_path: &Path,
-    registry_path: &Path,
-    env_resolver: &dyn Fn(&str) -> Option<String>,
-) -> Result<(Registry, HashMap<String, AgentProfile>), String> {
-    let registry = if registry_path.exists() {
-        Registry::load(registry_path)?
-    } else {
-        Registry::empty()
-    };
+pub fn load_agents(agents_path: &Path) -> Result<HashMap<String, AgentConfig>, String> {
     if !agents_path.exists() {
-        return Ok((registry, HashMap::new()));
+        return Ok(HashMap::new());
     }
     let registrations = load_registration(agents_path)?;
-    let mut profiles = HashMap::new();
+    let mut configs = HashMap::new();
     for reg in registrations {
-        let profile = reg.paths.load_profile(&registry, env_resolver)?;
-        profiles.insert(reg.name, profile);
+        let config = reg.paths.load_profile()?;
+        configs.insert(reg.name, config);
     }
-    Ok((registry, profiles))
+    Ok(configs)
 }
 
 pub fn load_registration(path: &Path) -> Result<Vec<AgentRegistration>, String> {
@@ -220,9 +207,8 @@ path = "/m"
     #[test]
     fn load_agents_missing_file_returns_zero() {
         let nonexistent = PathBuf::from("/tmp/tightbeam-test-nonexistent-agents.toml");
-        let registry_path = PathBuf::from("/tmp/tightbeam-test-nonexistent-registry.toml");
-        let (_reg, profiles) = load_agents(&nonexistent, &registry_path, &|_| None).unwrap();
-        assert!(profiles.is_empty());
+        let configs = load_agents(&nonexistent).unwrap();
+        assert!(configs.is_empty());
     }
 
     #[test]
@@ -234,8 +220,7 @@ path = "/m"
         let agents_toml = base.join("agents.toml");
         std::fs::write(&agents_toml, "[ghost]\npath = \"/nonexistent/agent/dir\"\n").unwrap();
 
-        let registry_path = base.join("registry.toml");
-        let err = load_agents(&agents_toml, &registry_path, &|_| None).unwrap_err();
+        let err = load_agents(&agents_toml).unwrap_err();
         assert!(err.contains("ghost"), "{err}");
         assert!(err.contains("not a directory"), "{err}");
 
@@ -248,12 +233,28 @@ path = "/m"
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
 
-        // Create agent dir with tightbeam.toml
         let agent_dir = base.join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("tightbeam.toml"), "[llm.claude]\n").unwrap();
 
-        // Create agents.toml
+        // Create secret file
+        let secret_path = base.join("api_key");
+        std::fs::write(&secret_path, "test-key").unwrap();
+
+        // Create tightbeam.toml with self-contained config
+        std::fs::write(
+            agent_dir.join("tightbeam.toml"),
+            format!(
+                r#"
+[llm]
+provider = "anthropic"
+model = "claude-sonnet"
+api_key_file = "{}"
+"#,
+                secret_path.display()
+            ),
+        )
+        .unwrap();
+
         let agents_toml = base.join("agents.toml");
         std::fs::write(
             &agents_toml,
@@ -261,22 +262,9 @@ path = "/m"
         )
         .unwrap();
 
-        // Create registry.toml
-        let registry_path = base.join("registry.toml");
-        std::fs::write(
-            &registry_path,
-            r#"
-[llm.claude]
-provider = "anthropic"
-model = "claude-sonnet"
-api_key = "test-key"
-"#,
-        )
-        .unwrap();
-
-        let (_reg, profiles) = load_agents(&agents_toml, &registry_path, &|_| None).unwrap();
-        assert_eq!(profiles.len(), 1);
-        assert!(profiles.contains_key("my-agent"));
+        let configs = load_agents(&agents_toml).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert!(configs.contains_key("my-agent"));
 
         let _ = std::fs::remove_dir_all(&base);
     }
