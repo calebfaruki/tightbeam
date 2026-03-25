@@ -1,0 +1,5 @@
+FROM scratch
+ARG TARGETARCH
+COPY tightbeam-daemon-linux-musl-${TARGETARCH} /usr/local/bin/tightbeam-daemon
+ENTRYPOINT ["tightbeam-daemon"]
+CMD ["start"]

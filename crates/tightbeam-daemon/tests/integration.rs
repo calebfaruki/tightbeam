@@ -115,8 +115,10 @@ async fn start_daemon(
     let listener = bind_agent_socket(sock_path).unwrap();
     let listeners = vec![("test-agent".to_string(), listener)];
 
-    let agents_path = logs_dir.parent().unwrap_or(&logs_dir).join("agents.toml");
-    let registry_path = logs_dir.parent().unwrap_or(&logs_dir).join("registry.toml");
+    let base = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
+    let sockets_dir = base.join("sockets");
+    let agents_path = base.join("agents.toml");
+    let registry_path = base.join("registry.toml");
 
     tokio::spawn(async move {
         run_daemon(
@@ -126,6 +128,7 @@ async fn start_daemon(
             providers,
             mcp_managers,
             logs_dir,
+            sockets_dir,
             agents_path,
             registry_path,
         )
@@ -141,8 +144,10 @@ async fn zero_agents_daemon_starts() {
     let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
 
     let logs = test_logs_dir("zero-agents");
-    let agents_path = logs.parent().unwrap_or(&logs).join("agents.toml");
-    let registry_path = logs.parent().unwrap_or(&logs).join("registry.toml");
+    let base = logs.parent().unwrap_or(&logs).to_path_buf();
+    let sockets_dir = base.join("sockets");
+    let agents_path = base.join("agents.toml");
+    let registry_path = base.join("registry.toml");
 
     let handle = tokio::spawn(async move {
         run_daemon(
@@ -152,6 +157,7 @@ async fn zero_agents_daemon_starts() {
             providers,
             mcp_managers,
             logs,
+            sockets_dir,
             agents_path,
             registry_path,
         )
@@ -661,8 +667,10 @@ mod mcp_integration {
         let listener = bind_agent_socket(sock_path).unwrap();
         let listeners = vec![("test-agent".to_string(), listener)];
 
-        let agents_path = logs_dir.parent().unwrap_or(&logs_dir).join("agents.toml");
-        let registry_path = logs_dir.parent().unwrap_or(&logs_dir).join("registry.toml");
+        let base = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
+        let sockets_dir = base.join("sockets");
+        let agents_path = base.join("agents.toml");
+        let registry_path = base.join("registry.toml");
 
         tokio::spawn(async move {
             run_daemon(
@@ -672,6 +680,7 @@ mod mcp_integration {
                 providers,
                 mcp_managers,
                 logs_dir,
+                sockets_dir,
                 agents_path,
                 registry_path,
             )

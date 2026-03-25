@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
 pub struct DaemonPaths {
     pub config_dir: PathBuf,
     pub sockets_dir: PathBuf,
