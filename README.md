@@ -2,7 +2,7 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-LLM proxy for containerized AI agents. The daemon proxies LLM API calls and remote MCP tool calls through a unix socket. The runtime drives the agent loop inside the container. Credentials never cross the socket boundary.
+LLM proxy for agent containers. The daemon proxies LLM API calls and remote MCP tool calls through a unix socket. The runtime drives the agent loop inside the container. Credentials never cross the socket boundary.
 
 ## How It Works
 

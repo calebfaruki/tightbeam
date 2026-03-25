@@ -1,7 +1,9 @@
 pub mod conversation;
 pub mod init;
 pub mod mcp;
+pub mod paths;
 pub mod profile;
+pub mod registration;
 pub mod protocol;
 
 use conversation::ConversationLog;
@@ -30,7 +32,7 @@ use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock};
 
 pub type ProfileMap = Arc<RwLock<HashMap<String, AgentProfile>>>;
 pub type ConversationMap = Arc<RwLock<HashMap<String, ConversationLog>>>;
-pub type ProviderMap = Arc<HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>>>;
+pub type ProviderMap = Arc<RwLock<HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>>>>;
 pub type McpManagerMap = Arc<RwLock<HashMap<String, McpManager>>>;
 pub type HumanMessageSenderMap = Arc<RwLock<HashMap<String, mpsc::Sender<HumanMessageDelivery>>>>;
 pub type AgentStateMap = Arc<HashMap<String, Arc<TokioMutex<AgentState>>>>;
@@ -583,10 +585,12 @@ async fn handle_runtime_connection(
                                     api_key: profile.llm.api_key.clone(),
                                     max_tokens: profile.llm.max_tokens,
                                 };
-                                let provider = providers
-                                    .get(&profile.llm.provider)
-                                    .ok_or_else(|| format!("unknown provider: {:?}", profile.llm.provider))?;
+                                let provider_key = profile.llm.provider.clone();
                                 drop(profs);
+                                let provs_guard = providers.read().await;
+                                let provider = provs_guard
+                                    .get(&provider_key)
+                                    .ok_or_else(|| format!("unknown provider: {:?}", provider_key))?;
 
                                 let subs = get_subscribers(&agent_state).await;
                                 let mut ctx = TurnContext {
@@ -780,6 +784,19 @@ pub fn bind_agent_socket(
 
 // --- Daemon runner ---
 
+pub fn build_providers(
+    profiles: &HashMap<String, profile::AgentProfile>,
+) -> HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> {
+    let mut providers = HashMap::new();
+    for profile in profiles.values() {
+        providers
+            .entry(profile.llm.provider.clone())
+            .or_insert_with(|| profile.llm.provider.build());
+    }
+    providers
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_daemon(
     listeners: Vec<(String, UnixListener)>,
     profiles: ProfileMap,
@@ -787,7 +804,8 @@ pub async fn run_daemon(
     providers: ProviderMap,
     mcp_managers: McpManagerMap,
     logs_base_dir: PathBuf,
-    config_dir: PathBuf,
+    agents_path: PathBuf,
+    registry_path: PathBuf,
 ) {
     let human_msg_senders: HumanMessageSenderMap = Arc::new(RwLock::new(HashMap::new()));
 
@@ -842,15 +860,22 @@ pub async fn run_daemon(
 
     loop {
         sighup.recv().await;
-        match profile::load_all(&config_dir) {
+        match registration::load_agents(&agents_path, &registry_path, &|name| std::env::var(name).ok()) {
             Ok((_registry, new_profiles)) => {
+                let new_providers = build_providers(&new_profiles);
                 let count = new_profiles.len();
-                let mut profs = profiles.write().await;
-                *profs = new_profiles;
+                {
+                    let mut profs = profiles.write().await;
+                    *profs = new_profiles;
+                }
+                {
+                    let mut provs = providers.write().await;
+                    *provs = new_providers;
+                }
                 tracing::info!("config reloaded ({count} profiles)");
             }
             Err(e) => {
-                tracing::error!("config reload failed: {e}");
+                tracing::error!("config reload failed (keeping current config): {e}");
             }
         }
     }

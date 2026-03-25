@@ -1,10 +1,10 @@
+use crate::paths::DaemonPaths;
 use std::path::{Path, PathBuf};
 
 pub struct InitConfig {
-    pub config_dir: PathBuf,
+    pub paths: DaemonPaths,
     pub data_dir: PathBuf,
     pub bin_path: PathBuf,
-    pub sockets_dir: PathBuf,
 }
 
 #[derive(Debug, PartialEq)]
@@ -23,10 +23,9 @@ impl InitConfig {
             std::env::current_exe().unwrap_or_else(|_| home.join(".local/bin/tightbeam-daemon"));
 
         Self {
-            config_dir: home.join(".config/tightbeam"),
+            paths: DaemonPaths::from_home(&home),
             data_dir: home.join(".local/share/tightbeam"),
             bin_path,
-            sockets_dir: home.join(".config/tightbeam/sockets"),
         }
     }
 }
@@ -52,12 +51,12 @@ pub fn run_init(config: &InitConfig) -> Result<(), Box<dyn std::error::Error>> {
     println!("tightbeam:");
     println!(
         "tightbeam: agent sockets directory: {}",
-        config.sockets_dir.display()
+        config.paths.sockets_dir.display()
     );
     println!("tightbeam: Docker volume mount (example for agent 'repairapp-dev'):");
     println!(
         "tightbeam:   -v {}/repairapp-dev.sock:/run/docker-tightbeam.sock",
-        config.sockets_dir.display()
+        config.paths.sockets_dir.display()
     );
 
     Ok(())
@@ -70,8 +69,8 @@ pub fn run_uninstall(config: &InitConfig) -> Result<(), Box<dyn std::error::Erro
     remove_service(config)?;
     println!("tightbeam: removed service file");
 
-    if config.sockets_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&config.sockets_dir) {
+    if config.paths.sockets_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&config.paths.sockets_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("sock") {
@@ -81,7 +80,7 @@ pub fn run_uninstall(config: &InitConfig) -> Result<(), Box<dyn std::error::Erro
         }
         println!(
             "tightbeam: cleaned sockets in {}",
-            config.sockets_dir.display()
+            config.paths.sockets_dir.display()
         );
     }
 
@@ -92,8 +91,7 @@ pub fn create_directories(config: &InitConfig) -> Result<Vec<String>, Box<dyn st
     let mut created = Vec::new();
 
     let dirs = [
-        config.config_dir.join("agents"),
-        config.sockets_dir.clone(),
+        config.paths.sockets_dir.clone(),
         config.data_dir.clone(),
         config.data_dir.join("logs"),
     ];
@@ -103,6 +101,16 @@ pub fn create_directories(config: &InitConfig) -> Result<Vec<String>, Box<dyn st
             std::fs::create_dir_all(dir)?;
             created.push(dir.to_string_lossy().to_string());
         }
+    }
+
+    let agents_file = config.paths.config_dir.join("agents.toml");
+    if !agents_file.exists() {
+        std::fs::create_dir_all(&config.paths.config_dir)?;
+        std::fs::write(
+            &agents_file,
+            "# Agent registrations\n# [agent-name]\n# path = \"/path/to/agent/directory\"\n",
+        )?;
+        created.push(agents_file.to_string_lossy().to_string());
     }
 
     Ok(created)
@@ -134,7 +142,7 @@ fn write_service_file(
 pub fn generate_systemd_unit(bin_path: &Path) -> String {
     format!(
         "[Unit]\n\
-         Description=Tightbeam daemon — LLM proxy for containerized AI agents\n\
+         Description=Tightbeam daemon — LLM proxy for agent containers\n\
          After=network.target\n\
          \n\
          [Service]\n\
@@ -362,10 +370,14 @@ mod idempotent_setup {
 
     fn temp_config(base: &Path) -> InitConfig {
         InitConfig {
-            config_dir: base.join("config/tightbeam"),
+            paths: DaemonPaths {
+                config_dir: base.join("config/tightbeam"),
+                sockets_dir: base.join("config/tightbeam/sockets"),
+                logs_dir: base.join("share/tightbeam/logs"),
+                pid_path: base.join("config/tightbeam/tightbeam.pid"),
+            },
             data_dir: base.join("share/tightbeam"),
             bin_path: PathBuf::from("/usr/local/bin/tightbeam-daemon"),
-            sockets_dir: base.join("config/tightbeam/sockets"),
         }
     }
 
@@ -376,14 +388,34 @@ mod idempotent_setup {
         let config = temp_config(&base);
 
         let created = create_directories(&config).unwrap();
-        assert_eq!(created.len(), 4);
-        assert!(config.config_dir.join("agents").is_dir());
-        assert!(config.sockets_dir.is_dir());
+        assert_eq!(created.len(), 4); // sockets, data, logs, agents.toml
+        assert!(config.paths.sockets_dir.is_dir());
         assert!(config.data_dir.is_dir());
         assert!(config.data_dir.join("logs").is_dir());
+        assert!(config.paths.config_dir.join("agents.toml").exists());
 
         let created = create_directories(&config).unwrap();
         assert!(created.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn init_does_not_overwrite_existing_agents_file() {
+        let base = std::env::temp_dir().join(format!(
+            "tightbeam-init-nooverwrite-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let config = temp_config(&base);
+
+        std::fs::create_dir_all(&config.paths.config_dir).unwrap();
+        let agents_file = config.paths.config_dir.join("agents.toml");
+        std::fs::write(&agents_file, "# my custom content\n").unwrap();
+
+        create_directories(&config).unwrap();
+        let content = std::fs::read_to_string(&agents_file).unwrap();
+        assert_eq!(content, "# my custom content\n");
 
         let _ = std::fs::remove_dir_all(&base);
     }

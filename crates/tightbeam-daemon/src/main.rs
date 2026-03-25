@@ -1,12 +1,14 @@
-use tightbeam_daemon::profile;
+use tightbeam_daemon::paths::DaemonPaths;
+use tightbeam_daemon::registration;
 use tightbeam_daemon::{
-    bind_agent_socket, run_daemon, ConversationMap, McpManagerMap, ProfileMap, ProviderMap,
+    bind_agent_socket, build_providers, run_daemon, ConversationMap, McpManagerMap, ProfileMap,
+    ProviderMap,
 };
 
 use std::collections::HashMap;
 use std::env;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 extern crate libc;
@@ -15,54 +17,29 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
-fn config_dir() -> PathBuf {
-    let home = env::var("HOME").expect("HOME not set");
-    PathBuf::from(home).join(".config").join("tightbeam")
-}
-
-fn agents_dir() -> PathBuf {
-    config_dir().join("agents")
-}
-
-fn sockets_dir() -> PathBuf {
-    config_dir().join("sockets")
-}
-
-fn logs_dir() -> PathBuf {
-    let home = env::var("HOME").expect("HOME not set");
-    PathBuf::from(home)
-        .join(".local/share/tightbeam")
-        .join("logs")
-}
-
-fn pid_path() -> PathBuf {
-    config_dir().join("tightbeam.pid")
-}
-
-fn write_pid_file() {
+fn write_pid_file(pid_path: &Path) {
     let pid = std::process::id();
-    if let Err(e) = std::fs::write(pid_path(), pid.to_string()) {
+    if let Err(e) = std::fs::write(pid_path, pid.to_string()) {
         tracing::warn!("failed to write pid file: {e}");
     }
 }
 
-fn remove_pid_file() {
-    let _ = std::fs::remove_file(pid_path());
+fn remove_pid_file(pid_path: &Path) {
+    let _ = std::fs::remove_file(pid_path);
 }
 
-fn restart_command() {
-    // Try SIGHUP if daemon is running
-    if let Ok(pid_str) = std::fs::read_to_string(pid_path()) {
+fn restart_command(paths: &DaemonPaths) {
+    if let Ok(pid_str) = std::fs::read_to_string(&paths.pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            if unsafe { libc::kill(pid, 0) } == 0 && unsafe { libc::kill(pid, libc::SIGHUP) } == 0 {
+            if unsafe { libc::kill(pid, 0) } == 0 && unsafe { libc::kill(pid, libc::SIGHUP) } == 0
+            {
                 println!("tightbeam: config reload triggered (pid {pid})");
                 return;
             }
-            let _ = std::fs::remove_file(pid_path());
+            let _ = std::fs::remove_file(&paths.pid_path);
         }
     }
 
-    // Daemon not running — start via service manager
     let started = if cfg!(target_os = "macos") {
         let uid = unsafe { libc::getuid() };
         std::process::Command::new("launchctl")
@@ -90,7 +67,7 @@ fn restart_command() {
     }
 }
 
-fn show_command(args: &[String]) {
+fn show_command(args: &[String], paths: &DaemonPaths) {
     let agent = match args.first() {
         Some(a) => a,
         None => {
@@ -99,8 +76,26 @@ fn show_command(args: &[String]) {
         }
     };
 
-    let path = agents_dir().join(format!("{agent}.toml"));
-    match std::fs::read_to_string(&path) {
+    let agents_path = paths.config_dir.join("agents.toml");
+    if !agents_path.exists() {
+        eprintln!("tightbeam: agents file not found — run 'tightbeam-daemon init'");
+        std::process::exit(1);
+    }
+    let registrations = match registration::load_registration(&agents_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("tightbeam: {e}");
+            std::process::exit(1);
+        }
+    };
+    let reg = match registrations.iter().find(|r| r.name == *agent) {
+        Some(r) => r,
+        None => {
+            eprintln!("tightbeam: agent '{agent}' not found in {}", agents_path.display());
+            std::process::exit(1);
+        }
+    };
+    match std::fs::read_to_string(reg.paths.profile_path()) {
         Ok(content) => print!("{content}"),
         Err(e) => {
             eprintln!("failed to read agent profile '{agent}': {e}");
@@ -109,7 +104,7 @@ fn show_command(args: &[String]) {
     }
 }
 
-fn logs_command(args: &[String]) {
+fn logs_command(args: &[String], paths: &DaemonPaths) {
     let agent = match args.first() {
         Some(a) => a,
         None => {
@@ -118,7 +113,7 @@ fn logs_command(args: &[String]) {
         }
     };
 
-    let log_path = logs_dir().join(agent).join("conversation.ndjson");
+    let log_path = paths.logs_dir.join(agent).join("conversation.ndjson");
     match std::fs::read_to_string(&log_path) {
         Ok(content) => print!("{content}"),
         Err(e) => {
@@ -128,15 +123,14 @@ fn logs_command(args: &[String]) {
     }
 }
 
-fn status_command() {
-    let sock_dir = sockets_dir();
-    if !sock_dir.exists() {
+fn status_command(paths: &DaemonPaths) {
+    if !paths.sockets_dir.exists() {
         println!("tightbeam: not initialized (run 'tightbeam-daemon init')");
         return;
     }
 
     let mut agents: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&sock_dir) {
+    if let Ok(entries) = std::fs::read_dir(&paths.sockets_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("sock") {
@@ -155,7 +149,7 @@ fn status_command() {
         for agent in &agents {
             println!(
                 "  {agent}\t{}",
-                sock_dir.join(format!("{agent}.sock")).display()
+                paths.sockets_dir.join(format!("{agent}.sock")).display()
             );
         }
     }
@@ -171,7 +165,7 @@ fn mime_from_extension(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
-async fn send_command(args: &[String]) -> Result<(), String> {
+async fn send_command(args: &[String], paths: &DaemonPaths) -> Result<(), String> {
     if args.len() < 2 {
         return Err(
             "usage: tightbeam-daemon send <agent> <message> [--file path] [--no-wait]".into(),
@@ -206,13 +200,11 @@ async fn send_command(args: &[String]) -> Result<(), String> {
         );
     }
 
-    // Build content array
     let mut content: Vec<serde_json::Value> = Vec::new();
     if !message.is_empty() {
         content.push(serde_json::json!({"type": "text", "text": message}));
     }
 
-    // Validate files and add FileIncoming blocks
     struct FileInfo {
         path: PathBuf,
         size: u64,
@@ -260,8 +252,7 @@ async fn send_command(args: &[String]) -> Result<(), String> {
         });
     }
 
-    // Connect and send Frame 1 (JSON RPC)
-    let sock_path = sockets_dir().join(format!("{agent}.sock"));
+    let sock_path = paths.sockets_dir.join(format!("{agent}.sock"));
     let stream = UnixStream::connect(&sock_path)
         .await
         .map_err(|e| format!("cannot connect to agent '{agent}': {e}"))?;
@@ -278,7 +269,6 @@ async fn send_command(args: &[String]) -> Result<(), String> {
         .await
         .map_err(|e| format!("write error: {e}"))?;
 
-    // Read RPC response before sending file frames
     let resp_frame = read_frame(&mut reader)
         .await
         .map_err(|e| format!("read error: {e}"))?
@@ -295,7 +285,6 @@ async fn send_command(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // Send file frames (after response confirms acceptance)
     for file_info in &files {
         use tightbeam_protocol::framing::write_frame_header;
         use tokio::io::AsyncReadExt;
@@ -332,7 +321,6 @@ async fn send_command(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // Read subscriber notifications
     loop {
         let frame = read_frame(&mut reader)
             .await
@@ -373,6 +361,7 @@ async fn send_command(args: &[String]) -> Result<(), String> {
 async fn main() {
     let args: Vec<String> = env::args().collect();
     let subcommand = args.get(1).map(|s| s.as_str()).unwrap_or("help");
+    let paths = DaemonPaths::detect();
 
     match subcommand {
         "start" => {}
@@ -397,19 +386,19 @@ async fn main() {
             return;
         }
         "status" => {
-            status_command();
+            status_command(&paths);
             return;
         }
         "show" => {
-            show_command(&args[2..]);
+            show_command(&args[2..], &paths);
             return;
         }
         "logs" => {
-            logs_command(&args[2..]);
+            logs_command(&args[2..], &paths);
             return;
         }
         "restart" => {
-            restart_command();
+            restart_command(&paths);
             return;
         }
         "stop" => {
@@ -421,7 +410,7 @@ async fn main() {
             return;
         }
         "send" => {
-            if let Err(e) = send_command(&args[2..]).await {
+            if let Err(e) = send_command(&args[2..], &paths).await {
                 eprintln!("tightbeam: {e}");
                 std::process::exit(1);
             }
@@ -441,26 +430,49 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
-    let cfg_dir = config_dir();
-    let (_registry, profile_map) = profile::load_all(&cfg_dir).unwrap_or_else(|e| {
-        eprintln!("tightbeam: {e}");
-        std::process::exit(1);
-    });
+    // Parse --agents and --registry flags
+    let mut agents_path: Option<PathBuf> = None;
+    let mut registry_path: Option<PathBuf> = None;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--agents" => {
+                i += 1;
+                agents_path = Some(PathBuf::from(&args[i]));
+            }
+            "--registry" => {
+                i += 1;
+                registry_path = Some(PathBuf::from(&args[i]));
+            }
+            other => {
+                eprintln!("tightbeam: unknown flag: {other}");
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+    let agents_path = agents_path.unwrap_or_else(|| paths.config_dir.join("agents.toml"));
+    let registry_path = registry_path.unwrap_or_else(|| paths.config_dir.join("registry.toml"));
+
+    let (_registry, profile_map) =
+        registration::load_agents(&agents_path, &registry_path, &|name| std::env::var(name).ok())
+            .unwrap_or_else(|e| {
+            eprintln!("tightbeam: {e}");
+            std::process::exit(1);
+        });
 
     if profile_map.is_empty() {
-        eprintln!(
-            "tightbeam: no agent profiles found in {} — create at least one to start",
-            agents_dir().display()
+        tracing::warn!(
+            "no agents registered — add entries to {}",
+            agents_path.display()
         );
-        std::process::exit(1);
     }
 
     // Bind sockets
-    let sock_dir = sockets_dir();
-    if let Err(e) = std::fs::create_dir_all(&sock_dir) {
+    if let Err(e) = std::fs::create_dir_all(&paths.sockets_dir) {
         eprintln!(
             "tightbeam: failed to create sockets directory {}: {e}",
-            sock_dir.display()
+            paths.sockets_dir.display()
         );
         std::process::exit(1);
     }
@@ -470,7 +482,7 @@ async fn main() {
     agent_names.sort();
 
     for name in &agent_names {
-        let sock_path = sock_dir.join(format!("{name}.sock"));
+        let sock_path = paths.sockets_dir.join(format!("{name}.sock"));
         match bind_agent_socket(&sock_path) {
             Ok(l) => {
                 tracing::info!("bound socket {} (mode 0600)", sock_path.display());
@@ -486,33 +498,28 @@ async fn main() {
         }
     }
 
-    tracing::info!(
-        "listening on {} agent socket(s): {}",
-        listeners.len(),
-        agent_names.join(", ")
-    );
-
-    // Initialize providers from profiles
-    let mut provider_map = HashMap::new();
-    for profile in profile_map.values() {
-        provider_map
-            .entry(profile.llm.provider.clone())
-            .or_insert_with(|| profile.llm.provider.build());
+    if !agent_names.is_empty() {
+        tracing::info!(
+            "listening on {} agent socket(s): {}",
+            listeners.len(),
+            agent_names.join(", ")
+        );
     }
+
+    let provider_map = build_providers(&profile_map);
 
     let profiles: ProfileMap = Arc::new(RwLock::new(profile_map));
     let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
-    let providers: ProviderMap = Arc::new(provider_map);
+    let providers: ProviderMap = Arc::new(RwLock::new(provider_map));
     let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
 
-    write_pid_file();
+    write_pid_file(&paths.pid_path);
 
     // Rebuild conversations from existing logs
-    let log_base = logs_dir();
     {
         let mut convos = conversations.write().await;
         for name in &agent_names {
-            let agent_log_dir = log_base.join(name);
+            let agent_log_dir = paths.logs_dir.join(name);
             if agent_log_dir.join("conversation.ndjson").exists() {
                 match tightbeam_daemon::conversation::ConversationLog::rebuild(&agent_log_dir) {
                     Ok(log) => {
@@ -536,10 +543,11 @@ async fn main() {
         conversations,
         providers,
         mcp_managers,
-        log_base,
-        cfg_dir,
+        paths.logs_dir,
+        agents_path,
+        registry_path,
     )
     .await;
 
-    remove_pid_file();
+    remove_pid_file(&paths.pid_path);
 }

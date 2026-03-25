@@ -108,14 +108,15 @@ async fn start_daemon(
     let mut providers: HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> =
         HashMap::new();
     providers.insert(tightbeam_providers::Provider::Anthropic, Box::new(provider));
-    let providers: ProviderMap = Arc::new(providers);
+    let providers: ProviderMap = Arc::new(RwLock::new(providers));
 
     let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
 
     let listener = bind_agent_socket(sock_path).unwrap();
     let listeners = vec![("test-agent".to_string(), listener)];
 
-    let config_dir = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
+    let agents_path = logs_dir.parent().unwrap_or(&logs_dir).join("agents.toml");
+    let registry_path = logs_dir.parent().unwrap_or(&logs_dir).join("registry.toml");
 
     tokio::spawn(async move {
         run_daemon(
@@ -125,10 +126,42 @@ async fn start_daemon(
             providers,
             mcp_managers,
             logs_dir,
-            config_dir,
+            agents_path,
+            registry_path,
         )
         .await;
     })
+}
+
+#[tokio::test]
+async fn zero_agents_daemon_starts() {
+    let profiles: ProfileMap = Arc::new(RwLock::new(HashMap::new()));
+    let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
+    let providers: ProviderMap = Arc::new(RwLock::new(HashMap::new()));
+    let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
+
+    let logs = test_logs_dir("zero-agents");
+    let agents_path = logs.parent().unwrap_or(&logs).join("agents.toml");
+    let registry_path = logs.parent().unwrap_or(&logs).join("registry.toml");
+
+    let handle = tokio::spawn(async move {
+        run_daemon(
+            vec![],
+            profiles,
+            conversations,
+            providers,
+            mcp_managers,
+            logs,
+            agents_path,
+            registry_path,
+        )
+        .await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!handle.is_finished(), "daemon should still be running with zero agents");
+    handle.abort();
+    let _ = std::fs::remove_dir_all(test_logs_dir("zero-agents"));
 }
 
 const REGISTER_FRAME: &str = r#"{"jsonrpc":"2.0","method":"register","params":{"role":"runtime"}}"#;
@@ -619,7 +652,7 @@ mod mcp_integration {
         let mut providers: HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> =
             HashMap::new();
         providers.insert(tightbeam_providers::Provider::Anthropic, Box::new(provider));
-        let providers: ProviderMap = Arc::new(providers);
+        let providers: ProviderMap = Arc::new(RwLock::new(providers));
 
         let mut mcp_map = HashMap::new();
         mcp_map.insert("test-agent".to_string(), McpManager::new(mcp_configs));
@@ -628,7 +661,8 @@ mod mcp_integration {
         let listener = bind_agent_socket(sock_path).unwrap();
         let listeners = vec![("test-agent".to_string(), listener)];
 
-        let config_dir = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
+        let agents_path = logs_dir.parent().unwrap_or(&logs_dir).join("agents.toml");
+        let registry_path = logs_dir.parent().unwrap_or(&logs_dir).join("registry.toml");
 
         tokio::spawn(async move {
             run_daemon(
@@ -638,7 +672,8 @@ mod mcp_integration {
                 providers,
                 mcp_managers,
                 logs_dir,
-                config_dir,
+                agents_path,
+                registry_path,
             )
             .await;
         })
