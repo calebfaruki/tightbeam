@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 pub(crate) const AGENT_DIR: &str = "/etc/agent";
+use tightbeam_protocol::SOCKET_PATH;
 
 pub(crate) struct RuntimeConfig {
     pub tools: Vec<String>,
@@ -12,7 +13,6 @@ pub(crate) struct RuntimeConfig {
 impl RuntimeConfig {
     pub(crate) fn from_args(args: &[String]) -> Result<Self, String> {
         let mut tools = None;
-        let mut socket_path = None;
         let mut max_iterations = 100u32;
         let mut max_output_chars = 30_000usize;
 
@@ -28,12 +28,6 @@ impl RuntimeConfig {
                             .filter(|s| !s.is_empty())
                             .collect(),
                     );
-                }
-                "--socket" => {
-                    i += 1;
-                    socket_path = Some(PathBuf::from(
-                        args.get(i).ok_or("--socket requires a value")?,
-                    ));
                 }
                 "--max-iterations" => {
                     i += 1;
@@ -56,7 +50,7 @@ impl RuntimeConfig {
 
         Ok(Self {
             tools: tools.ok_or("--tools is required")?,
-            socket_path: socket_path.ok_or("--socket is required")?,
+            socket_path: PathBuf::from(SOCKET_PATH),
             max_iterations,
             max_output_chars,
         })
@@ -73,40 +67,37 @@ mod config_parsing {
 
     #[test]
     fn full_args_parse() {
-        let a = args("--tools bash,read_file --socket /run/tb.sock --max-iterations 50 --max-output-chars 10000");
+        let a = args("--tools bash,read_file --max-iterations 50 --max-output-chars 10000");
         let config = RuntimeConfig::from_args(&a).unwrap();
         assert_eq!(config.tools, vec!["bash", "read_file"]);
-        assert_eq!(config.socket_path, PathBuf::from("/run/tb.sock"));
+        assert_eq!(config.socket_path, PathBuf::from(SOCKET_PATH));
         assert_eq!(config.max_iterations, 50);
         assert_eq!(config.max_output_chars, 10000);
     }
 
     #[test]
     fn defaults_for_optional_flags() {
-        let a = args("--tools bash --socket /s.sock");
+        let a = args("--tools bash");
         let config = RuntimeConfig::from_args(&a).unwrap();
+        assert_eq!(config.socket_path, PathBuf::from(SOCKET_PATH));
         assert_eq!(config.max_iterations, 100);
         assert_eq!(config.max_output_chars, 30000);
     }
 
     #[test]
-    fn missing_required_flag_errors() {
-        let a = args("--socket /s.sock");
-        assert!(RuntimeConfig::from_args(&a).is_err());
-
-        let a = args("--tools bash");
-        assert!(RuntimeConfig::from_args(&a).is_err());
+    fn missing_tools_errors() {
+        assert!(RuntimeConfig::from_args(&[]).is_err());
     }
 
     #[test]
     fn unknown_flag_errors() {
-        let a = args("--tools bash --socket /s.sock --bogus");
+        let a = args("--tools bash --bogus");
         assert!(RuntimeConfig::from_args(&a).is_err());
     }
 
     #[test]
     fn tools_split_by_comma() {
-        let a = args("--tools bash,read_file,write_file,list_directory --socket /s.sock");
+        let a = args("--tools bash,read_file,write_file,list_directory");
         let config = RuntimeConfig::from_args(&a).unwrap();
         assert_eq!(
             config.tools,
@@ -116,25 +107,20 @@ mod config_parsing {
 
     #[test]
     fn double_comma_in_tools_filters_empty() {
-        let a = vec![
-            "--tools".to_string(),
-            "bash,,read_file".to_string(),
-            "--socket".to_string(),
-            "/s.sock".to_string(),
-        ];
+        let a = vec!["--tools".to_string(), "bash,,read_file".to_string()];
         let config = RuntimeConfig::from_args(&a).unwrap();
         assert_eq!(config.tools, vec!["bash", "read_file"]);
     }
 
     #[test]
     fn invalid_max_iterations_errors() {
-        let a = args("--tools bash --socket /s.sock --max-iterations abc");
+        let a = args("--tools bash --max-iterations abc");
         assert!(RuntimeConfig::from_args(&a).is_err());
     }
 
     #[test]
     fn negative_max_iterations_errors() {
-        let a = args("--tools bash --socket /s.sock --max-iterations -1");
+        let a = args("--tools bash --max-iterations -1");
         assert!(RuntimeConfig::from_args(&a).is_err());
     }
 }

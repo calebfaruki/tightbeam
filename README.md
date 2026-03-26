@@ -2,19 +2,19 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-LLM proxy for agent containers. The daemon proxies LLM API calls and remote MCP tool calls through a unix socket. The runtime drives the agent loop inside the container. Credentials never cross the socket boundary.
+LLM and MCP proxy for agent workspaces. The daemon proxies LLM API calls and remote MCP tool calls through a unix socket. The runtime drives the agent loop inside the container. Credentials never cross the socket boundary.
 
 ## How It Works
 
-Three components:
+Two components:
 
-1. **Runtime** — a binary inside the container that runs the agent loop. Waits for human messages, sends turns to the daemon, executes tools locally (bash, file I/O), and sends results back. The agent logic lives here.
+1. **Runtime** — a binary inside the agent container that runs the agent loop. Waits for human messages, sends turns to the daemon, executes tools locally (bash, file I/O), and sends results back.
 
-2. **Daemon** — a long-running process on the host. Listens on per-agent unix sockets, attaches API credentials, manages conversation history, forwards requests to LLM providers, and executes MCP tool calls on behalf of the agent.
+2. **Daemon** — a sidecar process in the daemon container, one per agent. Listens on a unix socket, reads API credentials from mounted secret files, manages conversation history, forwards requests to the LLM provider, and executes MCP tool calls on behalf of the agent.
 
-3. **Registry + profiles** — a global registry defines available LLM providers and MCP servers. Per-agent TOML profiles reference registry entries by key, with optional overrides and MCP tool allowlists. Each agent gets its own unix socket. The agent never sees which model it talks to.
+Each agent gets its own daemon instance with a `tightbeam.toml` config declaring the LLM provider, model, MCP servers, and secret file paths.
 
-The runtime sends new messages via `turn` requests over a length-prefixed binary framing protocol. The daemon attaches the API key from the profile, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to per-agent NDJSON files on the host.
+The runtime sends new messages via `turn` requests over a length-prefixed binary framing protocol. The daemon reads the API key from a secret file, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to NDJSON files.
 
 ## Why Tightbeam
 
@@ -24,21 +24,13 @@ AI agents running in containers need to call LLM APIs, but giving them API keys 
 - **No audit trail** — the agent calls whatever it wants with your credentials
 - **No conversation control** — the agent manages its own context window
 
-Tightbeam solves this by proxying LLM calls through the host. The container sends messages, the host attaches credentials and manages history. The runtime is stateless — it doesn't know the API key, the model, or even the provider.
+Tightbeam solves this by proxying LLM calls through the daemon. The container sends messages, the daemon attaches credentials and manages history. The runtime is stateless — it doesn't know the API key, the model, or even the provider.
 
 When the container has no network egress, tightbeam is the agent's sole communication gateway to the outside world.
 
 Use [Airlock](https://github.com/calebfaruki/airlock) for CLI credential isolation. Use Tightbeam for LLM API isolation.
 
 ## Installation
-
-### Quick Install (Linux/macOS)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/calebfaruki/tightbeam/main/install.sh | sh
-```
-
-This downloads the daemon, ad-hoc signs it on macOS, installs it to `~/.local/bin/`, and runs `tightbeam-daemon init` to set up the system service. Pass `--force` to skip binary verification (useful if code signing fails).
 
 ### Container Setup
 
@@ -48,59 +40,44 @@ Download the runtime from [releases](https://github.com/calebfaruki/tightbeam/re
 COPY tightbeam /usr/local/bin/tightbeam
 ```
 
-The runtime drives the agent loop. It connects to the daemon socket, waits for human messages, calls the LLM, executes tools locally, and sends results back.
+The runtime drives the agent loop. It connects to the daemon socket, loads the system prompt from `/etc/agent/` (all `.md` files, sorted and concatenated), and enters the agent loop.
 
 ```sh
-tightbeam \
-  --system-prompt /etc/agent/prompt.md \
-  --tools bash,read_file,write_file,list_directory \
-  --socket /run/docker-tightbeam.sock
+tightbeam --tools bash,read_file,write_file,list_directory
 ```
+
+The runtime connects to the daemon socket at `/run/tightbeam/tightbeam.sock`.
 
 Flags:
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--system-prompt` | yes | — | Path to system prompt file |
 | `--tools` | yes | — | Comma-separated tool list |
-| `--socket` | yes | — | Path to daemon unix socket |
 | `--max-iterations` | no | 100 | Max tool call rounds per human message |
 | `--max-output-chars` | no | 30000 | Truncate tool output beyond this |
 
 Available tools: `bash`, `read_file`, `write_file`, `list_directory`.
 
-### Create a Registry
+The system prompt is assembled automatically from all `.md` files in `/etc/agent/` inside the container. Files are sorted by path and concatenated, supporting both single-file and multi-file layouts.
 
-The registry defines LLM providers and MCP servers available to all agents. Create `~/.config/tightbeam/registry.toml`:
+### Create an Agent Config
+
+Each daemon instance reads its config from `/etc/tightbeam/tightbeam.toml`. The config declares the LLM provider and optional MCP servers. Credentials are file paths pointing to platform-mounted secrets.
 
 ```toml
-[llm.claude-sonnet]
+[llm]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key = "sk-ant-..."
+api_key_file = "/run/secrets/anthropic_api_key"
 max_tokens = 8192
 
 [mcp.github]
 url = "https://mcp.github.com/sse"
-auth_token = "ghp_..."
-```
-
-### Create an Agent Profile
-
-Each agent gets a TOML file in `~/.config/tightbeam/agents/`. The filename becomes the agent name.
-
-```sh
-cat > ~/.config/tightbeam/agents/my-agent.toml << 'EOF'
-[llm.claude-sonnet]
-
-[mcp.github]
+auth_token_file = "/run/secrets/github_token"
 tools = ["create_pull_request", "list_issues"]
-EOF
 ```
 
-The `[llm.claude-sonnet]` section references the registry entry. An empty body uses all registry defaults. Fields present in the agent profile override the registry value for that field only.
-
-Exactly one `[llm.*]` section is required. `[mcp.*]` sections are optional.
+One `[llm]` section required. Zero or more `[mcp.*]` sections.
 
 ### Docker Run
 
@@ -108,16 +85,16 @@ Mount the agent's socket into the container:
 
 ```sh
 docker run \
-    -v ~/.config/tightbeam/sockets/my-agent.sock:/run/docker-tightbeam.sock \
+    -v /run/sockets/my-agent.sock:/run/docker-tightbeam.sock \
     your-image
 ```
 
-Conversation logs are written to `~/.local/share/tightbeam/logs/<agent>/`. Mount them read-only if the agent needs prior context on restart:
+Conversation logs are written to `<logs-dir>/<name>/`. Mount them read-only if the agent needs prior context on restart:
 
 ```sh
 docker run \
-    -v ~/.config/tightbeam/sockets/my-agent.sock:/run/docker-tightbeam.sock \
-    -v ~/.local/share/tightbeam/logs/my-agent:/var/log/tightbeam:ro \
+    -v /run/sockets/my-agent.sock:/run/docker-tightbeam.sock \
+    -v /var/log/tightbeam/my-agent:/var/log/tightbeam:ro \
     your-image
 ```
 
@@ -126,28 +103,28 @@ docker run \
 ### Daemon
 
 ```sh
-tightbeam-daemon start                                     # Run daemon in foreground
-tightbeam-daemon restart                                   # Reload config (SIGHUP) or start via service manager
-tightbeam-daemon init                                      # Install as system service (systemd/launchd)
-tightbeam-daemon init --uninstall                          # Remove system service
-tightbeam-daemon status                                    # Show running state, connected agents
-tightbeam-daemon show <agent>                              # Print active profile for an agent
-tightbeam-daemon logs <agent>                              # Print conversation log
-tightbeam-daemon send <agent> <message>                    # Send a message to an agent
-tightbeam-daemon send <agent> <message> --file photo.png   # Send with an image
-tightbeam-daemon send <agent> <message> --no-wait          # Send without waiting for response
-tightbeam-daemon stop                                      # Stop and uninstall service
-tightbeam-daemon version                                   # Print version
+tightbeam-daemon start
+tightbeam-daemon show
+tightbeam-daemon logs
+tightbeam-daemon send <message>
+tightbeam-daemon check
+tightbeam-daemon version
 ```
 
-`restart` sends SIGHUP to a running daemon, which reloads all agent profiles from disk without dropping connections. If the daemon isn't running, it starts it via the system service manager.
+No flags. All paths are hardcoded:
+- Config: `/etc/tightbeam/tightbeam.toml`
+- Socket: `/run/tightbeam/tightbeam.sock`
+- Logs: `/var/log/tightbeam/conversation.ndjson`
+
+The orchestrator mounts configs, secrets, and volumes at these paths.
+
 
 ### Runtime
 
-The runtime runs inside the container. It connects to the daemon socket, loads a system prompt, and enters the agent loop:
+The runtime runs inside the container. It connects to the daemon socket, loads the system prompt from `/etc/agent/`, and enters the agent loop:
 
 1. Register with the daemon, then wait for a human message
-2. Send a `turn` with system prompt, tool definitions, and the message
+2. Send a `turn` with the message (system prompt and tools are cached from the first turn)
 3. If the LLM returns tool calls, execute them locally and send results in a new `turn`
 4. Repeat until `end_turn` or `max_tokens`, then wait for the next human message
 
@@ -346,46 +323,37 @@ Subscribers receive text output only. Tool use events are internal to the runtim
 
 ## Configuration
 
-### Registry
+### Agent Config
 
-`~/.config/tightbeam/registry.toml` defines LLM providers and MCP servers centrally. Optional — agents can override every field.
+The daemon reads `/etc/tightbeam/tightbeam.toml`. The config is self-contained — it declares the LLM provider and MCP servers directly.
 
 ```toml
-[llm.claude-sonnet]
+[llm]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key = "sk-ant-..."
-max_tokens = 8192                    # optional, defaults to 8192
+api_key_file = "/run/secrets/anthropic_api_key"
+max_tokens = 8192                              # optional, defaults to 8192
 
 [mcp.github]
 url = "https://mcp.github.com/sse"
-auth_token = "ghp_..."
-
-[mcp.web-search]
-url = "https://mcp.search.example.com/sse"
-auth_token = "sk-search-..."
-```
-
-### Agent Profile
-
-`~/.config/tightbeam/agents/<name>.toml`. The filename stem is the agent name. Socket path (`sockets/<name>.sock`) and log path (`logs/<name>/`) are derived automatically.
-
-```toml
-[llm.claude-sonnet]
-# Empty body = all registry defaults.
-# Fields present override the registry value for that field only.
-# Example: override just the API key:
-# api_key = "sk-ant-agent-specific-..."
-
-[mcp.github]
+auth_token_file = "/run/secrets/github_token"
 tools = ["create_pull_request", "list_issues"]
 
 [mcp.web-search]
-# tools omitted = allow all tools from this server
-# tools = [] would allow none (server effectively disabled)
+url = "https://mcp.search.example.com/sse"
+auth_token_file = "/run/secrets/search_token"
 ```
 
-Exactly one `[llm.*]` section required. Zero or more `[mcp.*]` sections.
+One `[llm]` section required. Zero or more `[mcp.*]` sections.
+
+Credentials use `api_key_file` and `auth_token_file` — paths to files containing the secret value. The daemon reads the file at startup. The secret is trimmed of whitespace. Config files never contain credentials and are safe to commit.
+
+For local development, create secret files manually:
+```sh
+echo -n "sk-ant-..." > /run/secrets/anthropic_api_key
+```
+
+For containerized deployments, secrets are mounted by the platform (Docker secrets at `/run/secrets/`, k8s Secret volumes).
 
 ### MCP Tool Allowlists
 
@@ -407,7 +375,7 @@ When the LLM returns tool calls, the daemon partitions them:
 - **All MCP** — daemon executes them, appends results to conversation, calls the LLM again. The runtime waits and receives the final response.
 - **Mixed** — daemon executes MCP calls immediately, returns only the local calls to the runtime. When the runtime sends back local results, the daemon interleaves all results in the original call order and continues.
 
-MCP connections are lazy (first turn, not startup) and cached for the session. Auth uses Bearer tokens from profile configuration. If a connection drops mid-session, the daemon retries once.
+MCP connections are lazy (first turn, not startup) and cached for the session. Auth uses Bearer tokens read from `auth_token_file`. If a connection drops mid-session, the daemon retries once.
 
 ## Conversation Ownership
 
@@ -421,29 +389,25 @@ Tightbeam owns the conversation. The runtime is stateless.
 6. Loop continues until `end_turn` or `max_tokens`
 7. External messages arrive via `send` — the daemon delivers them as `human_message` notifications to the runtime, and the loop resumes from step 1
 
-## Host Filesystem Layout
+## Filesystem Layout
+
+Each daemon instance serves one agent. Paths are set by CLI flags:
 
 ```
-~/.config/tightbeam/
-  registry.toml                    # Global LLM/MCP server definitions
-  tightbeam.pid                    # Daemon PID (for SIGHUP reload)
-  agents/
-    my-agent.toml                  # Per-agent profile
-  sockets/
-    my-agent.sock                  # Per-agent unix socket (mode 0600)
-
-~/.local/share/tightbeam/
-  logs/
-    my-agent/
-      conversation.ndjson          # Full message log
+/etc/tightbeam/tightbeam.toml               # agent config
+/run/tightbeam/tightbeam.sock               # unix socket (mode 0600)
+/var/log/tightbeam/conversation.ndjson      # conversation log
 ```
+
+All paths are hardcoded. The orchestrator mounts configs and secrets at these locations.
 
 ## Security Model
 
-- Credentials stay on the host. API keys and MCP auth tokens never cross the socket boundary.
+- Credentials are read from mounted secret files (`api_key_file`, `auth_token_file`). Config files never contain secrets and are safe to commit.
+- API keys and MCP auth tokens never cross the socket boundary.
 - The agent does not know which model or provider it talks to.
-- LLM provider is swappable at the profile layer without agent changes.
-- MCP servers are configured on the host. The runtime has no knowledge of MCP.
-- All messages (user, assistant, tool results) are logged to NDJSON files on the host.
+- LLM provider is swappable at the config layer without agent changes.
+- MCP servers are configured by the daemon. The runtime has no knowledge of MCP.
+- All messages (user, assistant, tool results) are logged to NDJSON files.
 - Errors are forwarded as-is. Tightbeam does not retry or modify API responses.
-- External message delivery (`send`) goes through the daemon. The daemon queues messages for busy agents and tracks subscribers. Subscribers see agent text output only, never tool call internals.
+- External message delivery (`send`) goes through the daemon. The daemon queues messages for a busy agent and tracks subscribers. Subscribers see agent text output only, never tool call internals.

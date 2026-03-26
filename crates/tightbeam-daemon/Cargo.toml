@@ -1,11 +1,10 @@
 [package]
 name = "tightbeam-daemon"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [dependencies]
 base64 = "0.22"
-libc = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }

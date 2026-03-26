@@ -1,14 +1,11 @@
+pub mod config;
 pub mod conversation;
-pub mod init;
 pub mod mcp;
-pub mod paths;
-pub mod profile;
 pub mod protocol;
-pub mod registration;
 
+use config::AgentConfig;
 use conversation::ConversationLog;
 use mcp::McpManager;
-use profile::AgentConfig;
 use protocol::{
     build_delivered_notification, build_disconnect_notification, build_end_turn_notification,
     build_error, build_final_response, build_human_message_notification, build_notification,
@@ -22,7 +19,7 @@ use tightbeam_providers::{
 use futures::StreamExt;
 use std::collections::{HashMap, VecDeque};
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tightbeam_protocol::framing::{read_frame, write_frame};
 use tokio::io::AsyncWriteExt;
@@ -30,12 +27,11 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock};
 
-pub type ProfileMap = Arc<RwLock<HashMap<String, AgentConfig>>>;
-pub type ConversationMap = Arc<RwLock<HashMap<String, ConversationLog>>>;
-pub type ProviderMap = Arc<RwLock<HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>>>>;
-pub type McpManagerMap = Arc<RwLock<HashMap<String, McpManager>>>;
-pub type HumanMessageSenderMap = Arc<RwLock<HashMap<String, mpsc::Sender<HumanMessageDelivery>>>>;
-pub type AgentStateMap = Arc<RwLock<HashMap<String, Arc<TokioMutex<AgentState>>>>>;
+pub type Profile = Arc<AgentConfig>;
+pub type Conversation = Arc<RwLock<ConversationLog>>;
+pub type Provider = Arc<dyn LlmProvider>;
+pub type McpState = Arc<RwLock<McpManager>>;
+pub type HumanMessageSender = Arc<RwLock<Option<mpsc::Sender<HumanMessageDelivery>>>>;
 
 type SubscriberWriter = Arc<TokioMutex<OwnedWriteHalf>>;
 
@@ -191,7 +187,7 @@ async fn call_llm(
     })
 }
 
-// --- Pending MCP state (stored between turns when mixed local+MCP calls) ---
+// --- Pending MCP state ---
 
 struct PendingMcpState {
     mcp_results: HashMap<String, Message>,
@@ -251,7 +247,7 @@ fn interleave_results(
     ordered
 }
 
-// --- Turn context (bundles args to avoid too_many_arguments) ---
+// --- Turn context ---
 
 struct TurnContext<'a> {
     conversation: &'a mut ConversationLog,
@@ -388,7 +384,7 @@ async fn handle_turn(
     }
 }
 
-// --- deliver_human_message: write to runtime, register subscriber, signal delivery ---
+// --- deliver_human_message ---
 
 async fn deliver_human_message(
     delivery: HumanMessageDelivery,
@@ -411,7 +407,7 @@ async fn deliver_human_message(
     Ok(())
 }
 
-// --- finish_turn: broadcast end_turn, drain queue ---
+// --- finish_turn ---
 
 async fn finish_turn(
     agent_state: &Arc<TokioMutex<AgentState>>,
@@ -435,14 +431,10 @@ async fn finish_turn(
     Ok(())
 }
 
-// --- cleanup_agent: called on runtime disconnect ---
+// --- cleanup_agent ---
 
-async fn cleanup_agent(
-    agent: &str,
-    senders: &HumanMessageSenderMap,
-    agent_state: &Arc<TokioMutex<AgentState>>,
-) {
-    senders.write().await.remove(agent);
+async fn cleanup_agent(sender: &HumanMessageSender, agent_state: &Arc<TokioMutex<AgentState>>) {
+    *sender.write().await = None;
 
     let subs = {
         let mut state = agent_state.lock().await;
@@ -457,17 +449,14 @@ async fn cleanup_agent(
 
 // --- Connection routing ---
 
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_connection(
+async fn handle_connection(
     stream: tokio::net::UnixStream,
-    profile_name: String,
-    profiles: ProfileMap,
-    conversations: ConversationMap,
-    providers: ProviderMap,
-    mcp_managers: McpManagerMap,
+    profile: Profile,
+    conversation: Conversation,
+    provider: Provider,
+    mcp_state: McpState,
     agent_state: Arc<TokioMutex<AgentState>>,
-    human_msg_senders: HumanMessageSenderMap,
-    logs_base_dir: PathBuf,
+    human_msg_sender: HumanMessageSender,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = stream.into_split();
 
@@ -475,7 +464,7 @@ pub async fn handle_connection(
         Ok(Some(bytes)) => bytes,
         Ok(None) => return Ok(()),
         Err(e) => {
-            tracing::warn!("connection read error for {profile_name}: {e}");
+            tracing::warn!("connection read error: {e}");
             return Ok(());
         }
     };
@@ -486,28 +475,17 @@ pub async fn handle_connection(
             handle_runtime_connection(
                 reader,
                 writer,
-                profile_name,
-                profiles,
-                conversations,
-                providers,
-                mcp_managers,
+                profile,
+                conversation,
+                provider,
+                mcp_state,
                 agent_state,
-                human_msg_senders,
-                logs_base_dir,
+                human_msg_sender,
             )
             .await
         }
         Ok(ValidatedRequest::Send { id, params }) => {
-            handle_send_connection(
-                id,
-                params,
-                reader,
-                writer,
-                profile_name,
-                agent_state,
-                human_msg_senders,
-            )
-            .await
+            handle_send_connection(id, params, reader, writer, agent_state, human_msg_sender).await
         }
         Ok(ValidatedRequest::Turn { id, .. }) => {
             write_framed_json(
@@ -530,41 +508,29 @@ pub async fn handle_connection(
 async fn handle_runtime_connection(
     mut reader: OwnedReadHalf,
     mut writer: OwnedWriteHalf,
-    profile_name: String,
-    profiles: ProfileMap,
-    conversations: ConversationMap,
-    providers: ProviderMap,
-    mcp_managers: McpManagerMap,
+    profile: Profile,
+    conversation: Conversation,
+    provider: Provider,
+    mcp_state: McpState,
     agent_state: Arc<TokioMutex<AgentState>>,
-    human_msg_senders: HumanMessageSenderMap,
-    logs_base_dir: PathBuf,
+    human_msg_sender: HumanMessageSender,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     {
-        let profs = profiles.read().await;
-        let profile = profs
-            .get(&profile_name)
-            .ok_or_else(|| format!("unknown agent: {profile_name}"))?;
-        let mut mcp_mgrs = mcp_managers.write().await;
-        mcp_mgrs
-            .entry(profile_name.clone())
-            .or_insert_with(|| McpManager::new(profile.mcp_servers.clone()));
+        let prof = &*profile;
+        let mut mcp = mcp_state.write().await;
+        if !mcp.has_servers() && !prof.mcp_servers.is_empty() {
+            *mcp = McpManager::new(prof.mcp_servers.clone());
+        }
     }
 
-    let mut convos = conversations.write().await;
-    let conversation = convos
-        .entry(profile_name.clone())
-        .or_insert_with(|| ConversationLog::new(&logs_base_dir.join(&profile_name)));
+    let mut conv_guard = conversation.write().await;
+    let conv = &mut *conv_guard;
 
-    let mut mcp_mgrs = mcp_managers.write().await;
-    let mcp_manager = mcp_mgrs
-        .get_mut(&profile_name)
-        .expect("mcp manager must exist");
+    let mut mcp_guard = mcp_state.write().await;
+    let mcp_manager = &mut *mcp_guard;
 
     let (tx, mut rx) = mpsc::channel::<HumanMessageDelivery>(32);
-    human_msg_senders
-        .write()
-        .await
-        .insert(profile_name.clone(), tx);
+    *human_msg_sender.write().await = Some(tx);
 
     let mut pending = PendingMcpState::new();
 
@@ -576,25 +542,15 @@ async fn handle_runtime_connection(
                         let raw = String::from_utf8_lossy(&bytes);
                         match validate_request(&raw) {
                             Ok(ValidatedRequest::Turn { id, params }) => {
-                                let profs = profiles.read().await;
-                                let profile = profs
-                                    .get(&profile_name)
-                                    .expect("profile must exist in map");
                                 let config = ProviderConfig {
                                     model: profile.llm.model.clone(),
                                     api_key: profile.llm.api_key.clone(),
                                     max_tokens: profile.llm.max_tokens,
                                 };
-                                let provider_key = profile.llm.provider.clone();
-                                drop(profs);
-                                let provs_guard = providers.read().await;
-                                let provider = provs_guard
-                                    .get(&provider_key)
-                                    .ok_or_else(|| format!("unknown provider: {:?}", provider_key))?;
 
                                 let subs = get_subscribers(&agent_state).await;
                                 let mut ctx = TurnContext {
-                                    conversation,
+                                    conversation: conv,
                                     provider: provider.as_ref(),
                                     config: &config,
                                     mcp_manager,
@@ -620,7 +576,7 @@ async fn handle_runtime_connection(
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        tracing::warn!("connection read error for {profile_name}: {e}");
+                        tracing::warn!("connection read error: {e}");
                         break;
                     }
                 }
@@ -633,7 +589,7 @@ async fn handle_runtime_connection(
         }
     }
 
-    cleanup_agent(&profile_name, &human_msg_senders, &agent_state).await;
+    cleanup_agent(&human_msg_sender, &agent_state).await;
     Ok(())
 }
 
@@ -644,11 +600,10 @@ async fn handle_send_connection(
     params: SendParams,
     mut reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
-    profile_name: String,
     agent_state: Arc<TokioMutex<AgentState>>,
-    human_msg_senders: HumanMessageSenderMap,
+    human_msg_sender: HumanMessageSender,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let sender = human_msg_senders.read().await.get(&profile_name).cloned();
+    let sender = human_msg_sender.read().await.clone();
     let sender = match sender {
         Some(s) => s,
         None => {
@@ -665,7 +620,6 @@ async fn handle_send_connection(
     let mut content = params.content;
     let file_indices = tightbeam_protocol::file_incoming_indices(&content);
 
-    // Validate all file_incoming blocks before responding
     for &idx in &file_indices {
         if let ContentBlock::FileIncoming {
             mime_type, size, ..
@@ -710,7 +664,6 @@ async fn handle_send_connection(
         busy
     };
 
-    // Write RPC response BEFORE reading file frames (deadlock prevention)
     if was_busy {
         let mut w = sub_handle.lock().await;
         write_framed_json(&mut *w, &build_send_response(id, "queued")).await?;
@@ -719,7 +672,6 @@ async fn handle_send_connection(
         write_framed_json(&mut *w, &build_send_response(id, "delivered")).await?;
     }
 
-    // Read file frames and base64-encode (after response is written)
     for &idx in &file_indices {
         let mime_type = match &content[idx] {
             ContentBlock::FileIncoming { mime_type, .. } => mime_type.clone(),
@@ -735,7 +687,6 @@ async fn handle_send_connection(
         content[idx] = ContentBlock::image(&mime_type, &base64_data);
     }
 
-    // Build delivery AFTER file processing (partial failure safety)
     let delivery = HumanMessageDelivery {
         content,
         subscriber: Some(sub_handle.clone()),
@@ -762,7 +713,6 @@ async fn handle_send_connection(
         write_framed_json(&mut *w, &build_delivered_notification()).await?;
     }
 
-    // Keep task alive: read until subscriber disconnects
     while let Ok(Some(_)) = read_frame(&mut reader).await {}
 
     let mut state = agent_state.lock().await;
@@ -782,205 +732,39 @@ pub fn bind_agent_socket(
     Ok(listener)
 }
 
-// --- Reload helpers ---
-
-pub fn diff_agent_sets(
-    old: &std::collections::HashSet<String>,
-    new: &std::collections::HashSet<String>,
-) -> (Vec<String>, Vec<String>) {
-    let added = new.difference(old).cloned().collect();
-    let removed = old.difference(new).cloned().collect();
-    (added, removed)
-}
-
-pub async fn cleanup_removed_agent(
-    name: &str,
-    agent_states: &AgentStateMap,
-    conversations: &ConversationMap,
-    mcp_managers: &McpManagerMap,
-    human_msg_senders: &HumanMessageSenderMap,
-) {
-    agent_states.write().await.remove(name);
-    conversations.write().await.remove(name);
-    mcp_managers.write().await.remove(name);
-    human_msg_senders.write().await.remove(name);
-}
-
 // --- Daemon runner ---
 
-pub fn build_providers(
-    profiles: &HashMap<String, profile::AgentConfig>,
-) -> HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> {
-    let mut providers = HashMap::new();
-    for profile in profiles.values() {
-        providers
-            .entry(profile.llm.provider.clone())
-            .or_insert_with(|| profile.llm.provider.build());
-    }
-    providers
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_listener(
-    name: String,
-    listener: UnixListener,
-    profiles: ProfileMap,
-    conversations: ConversationMap,
-    providers: ProviderMap,
-    mcp_managers: McpManagerMap,
-    agent_states: AgentStateMap,
-    human_msg_senders: HumanMessageSenderMap,
-    logs_base_dir: PathBuf,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let agent_state = agent_states
-            .read()
-            .await
-            .get(&name)
-            .expect("agent state must exist")
-            .clone();
-
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::error!("accept error on {name}: {e}");
-                    continue;
-                }
-            };
-
-            let n = name.clone();
-            let p = profiles.clone();
-            let c = conversations.clone();
-            let pv = providers.clone();
-            let m = mcp_managers.clone();
-            let ld = logs_base_dir.clone();
-            let s = human_msg_senders.clone();
-            let as_ = agent_state.clone();
-
-            tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, n, p, c, pv, m, as_, s, ld).await {
-                    tracing::error!("connection error: {e}");
-                }
-            });
-        }
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn run_daemon(
-    listeners: Vec<(String, UnixListener)>,
-    profiles: ProfileMap,
-    conversations: ConversationMap,
-    providers: ProviderMap,
-    mcp_managers: McpManagerMap,
-    logs_base_dir: PathBuf,
-    sockets_dir: PathBuf,
-    agents_path: PathBuf,
+    listener: UnixListener,
+    profile: Profile,
+    conversation: Conversation,
+    provider: Provider,
+    mcp_state: McpState,
 ) {
-    let human_msg_senders: HumanMessageSenderMap = Arc::new(RwLock::new(HashMap::new()));
-
-    let mut agent_state_map: HashMap<String, Arc<TokioMutex<AgentState>>> = HashMap::new();
-    for (name, _) in &listeners {
-        agent_state_map.insert(name.clone(), Arc::new(TokioMutex::new(AgentState::new())));
-    }
-    let agent_states: AgentStateMap = Arc::new(RwLock::new(agent_state_map));
-
-    let mut listener_handles: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
-    for (name, listener) in listeners {
-        let handle = spawn_listener(
-            name.clone(),
-            listener,
-            profiles.clone(),
-            conversations.clone(),
-            providers.clone(),
-            mcp_managers.clone(),
-            agent_states.clone(),
-            human_msg_senders.clone(),
-            logs_base_dir.clone(),
-        );
-        listener_handles.insert(name, handle);
-    }
-
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .expect("failed to register SIGHUP handler");
+    let human_msg_sender: HumanMessageSender = Arc::new(RwLock::new(None));
+    let agent_state = Arc::new(TokioMutex::new(AgentState::new()));
 
     loop {
-        sighup.recv().await;
-        match registration::load_agents(&agents_path) {
-            Ok(new_profiles) => {
-                let old_names: std::collections::HashSet<String> =
-                    profiles.read().await.keys().cloned().collect();
-                let new_names: std::collections::HashSet<String> =
-                    new_profiles.keys().cloned().collect();
-
-                let (added, removed) = diff_agent_sets(&old_names, &new_names);
-
-                // 1. Remove agents
-                for name in &removed {
-                    if let Some(handle) = listener_handles.remove(name) {
-                        handle.abort();
-                    }
-                    let sock_path = sockets_dir.join(format!("{name}.sock"));
-                    let _ = std::fs::remove_file(&sock_path);
-                    cleanup_removed_agent(
-                        name,
-                        &agent_states,
-                        &conversations,
-                        &mcp_managers,
-                        &human_msg_senders,
-                    )
-                    .await;
-                    tracing::info!("removed agent {name}");
-                }
-
-                // 2. Swap profiles and providers
-                let new_providers = build_providers(&new_profiles);
-                let count = new_profiles.len();
-                {
-                    let mut profs = profiles.write().await;
-                    *profs = new_profiles;
-                }
-                {
-                    let mut provs = providers.write().await;
-                    *provs = new_providers;
-                }
-
-                // 3. Add new agents
-                for name in &added {
-                    let sock_path = sockets_dir.join(format!("{name}.sock"));
-                    match bind_agent_socket(&sock_path) {
-                        Ok(listener) => {
-                            agent_states
-                                .write()
-                                .await
-                                .insert(name.clone(), Arc::new(TokioMutex::new(AgentState::new())));
-                            let handle = spawn_listener(
-                                name.clone(),
-                                listener,
-                                profiles.clone(),
-                                conversations.clone(),
-                                providers.clone(),
-                                mcp_managers.clone(),
-                                agent_states.clone(),
-                                human_msg_senders.clone(),
-                                logs_base_dir.clone(),
-                            );
-                            listener_handles.insert(name.clone(), handle);
-                            tracing::info!("added agent {name}");
-                        }
-                        Err(e) => {
-                            tracing::error!("failed to bind socket for {name}: {e}");
-                        }
-                    }
-                }
-
-                tracing::info!("config reloaded ({count} agents)");
-            }
+        let (stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
             Err(e) => {
-                tracing::error!("config reload failed (keeping current config): {e}");
+                tracing::error!("accept error: {e}");
+                continue;
             }
-        }
+        };
+
+        let p = profile.clone();
+        let c = conversation.clone();
+        let pv = provider.clone();
+        let m = mcp_state.clone();
+        let s = human_msg_sender.clone();
+        let as_ = agent_state.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, p, c, pv, m, as_, s).await {
+                tracing::error!("connection error: {e}");
+            }
+        });
     }
 }
 
@@ -993,8 +777,6 @@ mod tests {
         mcp::tool_result_message(tc_id.into(), content.into(), false)
     }
 
-    // --- interleave_results ---
-
     #[test]
     fn interleave_preserves_call_order() {
         let mut mcp = HashMap::new();
@@ -1002,7 +784,6 @@ mod tests {
         mcp.insert("mcp-2".into(), tool_result_msg("mcp-2", "mcp result 2"));
 
         let local = vec![tool_result_msg("local-1", "local result 1")];
-
         let order = vec!["mcp-1".into(), "local-1".into(), "mcp-2".into()];
 
         let result = interleave_results(mcp, local, order);
@@ -1028,7 +809,6 @@ mod tests {
         ];
 
         let order = vec!["local-1".into(), "mcp-1".into(), "local-2".into()];
-
         let result = interleave_results(mcp, local, order);
 
         assert_eq!(result.len(), 3);
@@ -1045,7 +825,6 @@ mod tests {
         mcp.insert("mcp-1".into(), tool_result_msg("mcp-1", "mcp"));
 
         let local = vec![tool_result_msg("local-1", "local")];
-
         let order = vec!["mcp-1".into(), "ghost".into(), "local-1".into()];
 
         let result = interleave_results(mcp, local, order);
@@ -1060,8 +839,6 @@ mod tests {
         let result = interleave_results(HashMap::new(), vec![], vec![]);
         assert!(result.is_empty());
     }
-
-    // --- PendingMcpState ---
 
     #[test]
     fn pending_new_is_empty() {
@@ -1110,86 +887,5 @@ mod tests {
         assert_eq!(content_text(&a.content), Some("result a"));
         let b = &results["tc-b"];
         assert_eq!(content_text(&b.content), Some("result b"));
-    }
-
-    // --- diff_agent_sets ---
-
-    #[test]
-    fn diff_empty_sets() {
-        let old = std::collections::HashSet::new();
-        let new = std::collections::HashSet::new();
-        let (added, removed) = diff_agent_sets(&old, &new);
-        assert!(added.is_empty());
-        assert!(removed.is_empty());
-    }
-
-    #[test]
-    fn diff_add_one() {
-        let old = std::collections::HashSet::new();
-        let new: std::collections::HashSet<String> = ["agent-b".into()].into();
-        let (added, removed) = diff_agent_sets(&old, &new);
-        assert_eq!(added, vec!["agent-b"]);
-        assert!(removed.is_empty());
-    }
-
-    #[test]
-    fn diff_remove_one() {
-        let old: std::collections::HashSet<String> = ["agent-a".into()].into();
-        let new = std::collections::HashSet::new();
-        let (added, removed) = diff_agent_sets(&old, &new);
-        assert!(added.is_empty());
-        assert_eq!(removed, vec!["agent-a"]);
-    }
-
-    #[test]
-    fn diff_unchanged_not_in_either() {
-        let old: std::collections::HashSet<String> = ["keep".into(), "remove".into()].into();
-        let new: std::collections::HashSet<String> = ["keep".into(), "add".into()].into();
-        let (mut added, mut removed) = diff_agent_sets(&old, &new);
-        added.sort();
-        removed.sort();
-        assert_eq!(added, vec!["add"]);
-        assert_eq!(removed, vec!["remove"]);
-    }
-
-    // --- cleanup_removed_agent ---
-
-    #[tokio::test]
-    async fn cleanup_removes_from_all_maps() {
-        let agent_states: AgentStateMap = Arc::new(RwLock::new(HashMap::new()));
-        let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
-        let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
-        let human_msg_senders: HumanMessageSenderMap = Arc::new(RwLock::new(HashMap::new()));
-
-        agent_states
-            .write()
-            .await
-            .insert("test".into(), Arc::new(TokioMutex::new(AgentState::new())));
-        conversations.write().await.insert(
-            "test".into(),
-            conversation::ConversationLog::new(std::path::Path::new("/tmp")),
-        );
-        mcp_managers
-            .write()
-            .await
-            .insert("test".into(), mcp::McpManager::new(vec![]));
-        human_msg_senders
-            .write()
-            .await
-            .insert("test".into(), tokio::sync::mpsc::channel(1).0);
-
-        cleanup_removed_agent(
-            "test",
-            &agent_states,
-            &conversations,
-            &mcp_managers,
-            &human_msg_senders,
-        )
-        .await;
-
-        assert!(agent_states.read().await.get("test").is_none());
-        assert!(conversations.read().await.get("test").is_none());
-        assert!(mcp_managers.read().await.get("test").is_none());
-        assert!(human_msg_senders.read().await.get("test").is_none());
     }
 }
