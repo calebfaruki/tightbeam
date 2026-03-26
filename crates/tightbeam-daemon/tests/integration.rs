@@ -5,13 +5,10 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use tightbeam_daemon::mcp::McpManager;
 use tightbeam_daemon::config::{AgentConfig, ResolvedLlm, ResolvedMcp};
+use tightbeam_daemon::mcp::McpManager;
 use tightbeam_daemon::protocol::{Message, ToolDefinition};
-use tightbeam_daemon::{
-    bind_agent_socket, run_daemon, Conversation, McpState, Profile,
-    Provider,
-};
+use tightbeam_daemon::{bind_agent_socket, run_daemon, Conversation, McpState, Profile, Provider};
 use tightbeam_protocol::framing::{read_frame, write_frame};
 use tightbeam_providers::{LlmProvider, ProviderConfig, StreamEvent};
 use tokio::net::UnixStream;
@@ -112,16 +109,7 @@ async fn start_daemon(
     let listener = bind_agent_socket(sock_path).unwrap();
 
     tokio::spawn(async move {
-        run_daemon(
-            listener,
-            profile,
-            conversation,
-            provider,
-            mcp_state,
-            logs_dir,
-            "test-agent".to_string(),
-        )
-        .await;
+        run_daemon(listener, profile, conversation, provider, mcp_state).await;
     })
 }
 
@@ -616,16 +604,7 @@ mod mcp_integration {
         let listener = bind_agent_socket(sock_path).unwrap();
 
         tokio::spawn(async move {
-            run_daemon(
-                listener,
-                profile,
-                conversation,
-                provider,
-                mcp_state,
-                logs_dir,
-                "test-agent".to_string(),
-            )
-            .await;
+            run_daemon(listener, profile, conversation, provider, mcp_state).await;
         })
     }
 
@@ -1039,18 +1018,8 @@ async fn smoke_full_startup_path() {
     ));
     let mcp_state: McpState = Arc::new(RwLock::new(McpManager::new(vec![])));
 
-    let logs = logs_dir.clone();
     tokio::spawn(async move {
-        run_daemon(
-            listener,
-            profile,
-            conversation,
-            provider,
-            mcp_state,
-            logs,
-            "smoke-agent".to_string(),
-        )
-        .await;
+        run_daemon(listener, profile, conversation, provider, mcp_state).await;
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

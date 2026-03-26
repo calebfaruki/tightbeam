@@ -433,10 +433,7 @@ async fn finish_turn(
 
 // --- cleanup_agent ---
 
-async fn cleanup_agent(
-    sender: &HumanMessageSender,
-    agent_state: &Arc<TokioMutex<AgentState>>,
-) {
+async fn cleanup_agent(sender: &HumanMessageSender, agent_state: &Arc<TokioMutex<AgentState>>) {
     *sender.write().await = None;
 
     let subs = {
@@ -452,7 +449,6 @@ async fn cleanup_agent(
 
 // --- Connection routing ---
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     profile: Profile,
@@ -461,8 +457,6 @@ async fn handle_connection(
     mcp_state: McpState,
     agent_state: Arc<TokioMutex<AgentState>>,
     human_msg_sender: HumanMessageSender,
-    logs_dir: std::path::PathBuf,
-    agent_name: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = stream.into_split();
 
@@ -487,8 +481,6 @@ async fn handle_connection(
                 mcp_state,
                 agent_state,
                 human_msg_sender,
-                logs_dir,
-                agent_name,
             )
             .await
         }
@@ -522,8 +514,6 @@ async fn handle_runtime_connection(
     mcp_state: McpState,
     agent_state: Arc<TokioMutex<AgentState>>,
     human_msg_sender: HumanMessageSender,
-    logs_dir: std::path::PathBuf,
-    agent_name: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     {
         let prof = &*profile;
@@ -535,9 +525,6 @@ async fn handle_runtime_connection(
 
     let mut conv_guard = conversation.write().await;
     let conv = &mut *conv_guard;
-    if conv.history().is_empty() {
-        *conv = ConversationLog::new(&logs_dir.join(&agent_name));
-    }
 
     let mut mcp_guard = mcp_state.write().await;
     let mcp_manager = &mut *mcp_guard;
@@ -747,15 +734,12 @@ pub fn bind_agent_socket(
 
 // --- Daemon runner ---
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_daemon(
     listener: UnixListener,
     profile: Profile,
     conversation: Conversation,
     provider: Provider,
     mcp_state: McpState,
-    logs_dir: std::path::PathBuf,
-    agent_name: String,
 ) {
     let human_msg_sender: HumanMessageSender = Arc::new(RwLock::new(None));
     let agent_state = Arc::new(TokioMutex::new(AgentState::new()));
@@ -773,13 +757,11 @@ pub async fn run_daemon(
         let c = conversation.clone();
         let pv = provider.clone();
         let m = mcp_state.clone();
-        let ld = logs_dir.clone();
         let s = human_msg_sender.clone();
         let as_ = agent_state.clone();
-        let n = agent_name.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, p, c, pv, m, as_, s, ld, n).await {
+            if let Err(e) = handle_connection(stream, p, c, pv, m, as_, s).await {
                 tracing::error!("connection error: {e}");
             }
         });

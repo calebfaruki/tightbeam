@@ -62,7 +62,7 @@ The system prompt is assembled automatically from all `.md` files in `/etc/agent
 
 ### Create an Agent Config
 
-Each daemon instance takes a `tightbeam.toml` config file via `--config`. The config declares the LLM provider and optional MCP servers. Credentials are file paths pointing to platform-mounted secrets.
+Each daemon instance reads its config from `/etc/tightbeam/tightbeam.toml`. The config declares the LLM provider and optional MCP servers. Credentials are file paths pointing to platform-mounted secrets.
 
 ```toml
 [llm]
@@ -103,19 +103,20 @@ docker run \
 ### Daemon
 
 ```sh
-tightbeam-daemon start --name my-agent --config /path/to/tightbeam.toml --logs-dir /path/to/logs
-tightbeam-daemon show --config /path/to/tightbeam.toml
-tightbeam-daemon logs --name my-agent --logs-dir /path/to/logs
+tightbeam-daemon start
+tightbeam-daemon show
+tightbeam-daemon logs
 tightbeam-daemon send <message>
-tightbeam-daemon send <message> --file photo.png
-tightbeam-daemon send <message> --no-wait
-tightbeam-daemon check --config /path/to/tightbeam.toml
+tightbeam-daemon check
 tightbeam-daemon version
 ```
 
-Three flags (`--name`, `--config`, `--logs-dir`) are required for `start`. All flags also accept environment variables (`TIGHTBEAM_NAME`, `TIGHTBEAM_CONFIG`, `TIGHTBEAM_LOGS_DIR`).
+No flags. All paths are hardcoded:
+- Config: `/etc/tightbeam/tightbeam.toml`
+- Socket: `/run/tightbeam/tightbeam.sock`
+- Logs: `/var/log/tightbeam/conversation.ndjson`
 
-The daemon socket is always at `/run/tightbeam/tightbeam.sock`. Both daemon and runtime use this path — no configuration needed.
+The orchestrator mounts configs, secrets, and volumes at these paths.
 
 
 ### Runtime
@@ -324,7 +325,7 @@ Subscribers receive text output only. Tool use events are internal to the runtim
 
 ### Agent Config
 
-The daemon takes a `tightbeam.toml` config file via `--config`. The config is self-contained — it declares the LLM provider and MCP servers directly.
+The daemon reads `/etc/tightbeam/tightbeam.toml`. The config is self-contained — it declares the LLM provider and MCP servers directly.
 
 ```toml
 [llm]
@@ -393,12 +394,12 @@ Tightbeam owns the conversation. The runtime is stateless.
 Each daemon instance serves one agent. Paths are set by CLI flags:
 
 ```
---config /etc/tightbeam/agents/my-agent/tightbeam.toml
---logs-dir /var/log/tightbeam           # logs written to <logs-dir>/<name>/conversation.ndjson
---name my-agent
+/etc/tightbeam/tightbeam.toml               # agent config
+/run/tightbeam/tightbeam.sock               # unix socket (mode 0600)
+/var/log/tightbeam/conversation.ndjson      # conversation log
 ```
 
-The daemon socket is at `/run/tightbeam/tightbeam.sock` (hardcoded, shared via volume mount).
+All paths are hardcoded. The orchestrator mounts configs and secrets at these locations.
 
 ## Security Model
 

@@ -1,6 +1,8 @@
 pub mod framing;
 
 pub const SOCKET_PATH: &str = "/run/tightbeam/tightbeam.sock";
+pub const CONFIG_PATH: &str = "/etc/tightbeam/tightbeam.toml";
+pub const LOGS_PATH: &str = "/var/log/tightbeam/conversation.ndjson";
 
 use serde::{Deserialize, Serialize};
 
