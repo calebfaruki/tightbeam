@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tightbeam — LLM proxy for agent containers</title>
-  <meta name="description" content="LLM proxy for agent containers. Proxies API calls through a unix socket without mounting credentials into the container.">
+  <title>Tightbeam — LLM and MCP proxy for agent workspaces</title>
+  <meta name="description" content="LLM and MCP proxy for agent workspaces. Routes API calls through a unix socket without exposing credentials to the workspace.">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -37,10 +37,10 @@
       </pre>
 
       <p class="text-lg sm:text-xl font-medium text-gray-300 mb-3">
-        LLM proxy for agent containers.
+        LLM and MCP proxy for agent workspaces.
       </p>
       <p class="text-sm text-gray-500 mb-8 leading-relaxed">
-        Proxies LLM API calls from container to host over a unix socket. Credentials stay on the host. The agent sends messages, tightbeam attaches the API key and manages conversation history. The agent never sees the key, the model, or the provider.
+        Proxies LLM API calls over a unix socket between workspace and daemon. Credentials stay in the daemon. The agent sends messages, tightbeam attaches the API key and manages conversation history. The agent never sees the key, the model, or the provider.
       </p>
 
       <a href="https://github.com/calebfaruki/tightbeam" class="text-sm text-gray-500 hover:text-white transition-colors">github.com/calebfaruki/tightbeam</a>
@@ -66,12 +66,12 @@ docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
       <h2 class="border-b border-white/20 text-lg font-medium mb-6">The solution</h2>
 
       <p class="text-sm text-gray-300 mb-8">
-        Credentials stay on the host. A daemon proxies LLM calls over a unix socket.
+        Credentials stay in the daemon. A sidecar daemon proxies LLM calls over a unix socket.
       </p>
 
       <div class="grid sm:grid-cols-2 gap-0 mb-8 text-sm">
         <div class="border border-white/10 bg-zinc-900 px-5 py-4">
-          <div class="text-gray-300 font-medium mb-3">Container</div>
+          <div class="text-gray-300 font-medium mb-3">Workspace</div>
           <div class="text-gray-500 space-y-1">
             <div>runtime sends <span class="text-gray-400">turn</span></div>
             <div class="text-gray-600 pl-4">&darr;</div>
@@ -115,8 +115,8 @@ docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
         <div>
           <h3 class="text-sm font-medium text-gray-300 mb-3">Tightbeam</h3>
           <ul class="space-y-2 text-sm text-gray-400">
-            <li>API key lives on the host, never in the container</li>
-            <li>Host logs every exchange to NDJSON</li>
+            <li>API key lives in the daemon, never in the workspace</li>
+            <li>Daemon logs every exchange to NDJSON</li>
             <li>Agent sends messages over a unix socket &mdash; no HTTPS, no credential</li>
             <li>Provider and model are swappable without changing agent code</li>
           </ul>
@@ -200,7 +200,7 @@ model = "claude-sonnet-4-20250514"
 api_key_file = "/run/secrets/anthropic_api_key"
 EOF
 
-<span class="text-gray-600"># Daemon discovers agents by scanning --agents-dir</span>
+<span class="text-gray-600"># Daemon takes --config pointing to a tightbeam.toml file</span>
 <span class="text-gray-600"># Docker Compose or Helm mounts configs and secrets into the daemon container</span></pre>
     </section>
 
@@ -222,7 +222,7 @@ EOF
         <div class="border border-white/10 px-4 py-4">
           <div class="text-sm font-medium text-gray-300 mb-2">Each agent is isolated from every other</div>
           <p class="text-xs text-gray-500 leading-relaxed">
-            Per-agent sockets, per-agent credentials, per-agent conversation logs. A compromised agent's session can't affect other agents. The blast radius of any single failure is one socket.
+            Each agent has its own daemon, socket, credentials, and conversation logs. A compromised agent's session can't affect other agents. The blast radius of any single failure is one daemon instance.
           </p>
         </div>
         <div class="border border-white/10 px-4 py-4">

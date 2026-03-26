@@ -2,7 +2,7 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-LLM proxy for agent containers. The daemon proxies LLM API calls and remote MCP tool calls through a unix socket. The runtime drives the agent loop inside the container. Credentials never cross the socket boundary.
+LLM and MCP proxy for agent workspaces. The daemon proxies LLM API calls and remote MCP tool calls through a unix socket. The runtime drives the agent loop inside the container. Credentials never cross the socket boundary.
 
 ## How It Works
 
@@ -10,11 +10,11 @@ Two components:
 
 1. **Runtime** — a binary inside the agent container that runs the agent loop. Waits for human messages, sends turns to the daemon, executes tools locally (bash, file I/O), and sends results back.
 
-2. **Daemon** — a long-running process in the daemon container. Listens on per-agent unix sockets, reads API credentials from mounted secret files, manages conversation history, forwards requests to LLM providers, and executes MCP tool calls on behalf of the agent.
+2. **Daemon** — a sidecar process in the daemon container, one per agent. Listens on a unix socket, reads API credentials from mounted secret files, manages conversation history, forwards requests to the LLM provider, and executes MCP tool calls on behalf of the agent.
 
-The daemon discovers agents by scanning a directory (`--agents-dir`). Each subdirectory is an agent, named by the directory. Each contains a `tightbeam.toml` with the LLM provider, model, MCP servers, and secret file paths.
+Each agent gets its own daemon instance with a `tightbeam.toml` config declaring the LLM provider, model, MCP servers, and secret file paths.
 
-The runtime sends new messages via `turn` requests over a length-prefixed binary framing protocol. The daemon reads the API key from a secret file, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to per-agent NDJSON files.
+The runtime sends new messages via `turn` requests over a length-prefixed binary framing protocol. The daemon reads the API key from a secret file, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to NDJSON files.
 
 ## Why Tightbeam
 
@@ -43,17 +43,16 @@ COPY tightbeam /usr/local/bin/tightbeam
 The runtime drives the agent loop. It connects to the daemon socket, loads the system prompt from `/etc/agent/` (all `.md` files, sorted and concatenated), and enters the agent loop.
 
 ```sh
-tightbeam \
-  --tools bash,read_file,write_file,list_directory \
-  --socket /run/docker-tightbeam.sock
+tightbeam --tools bash,read_file,write_file,list_directory
 ```
+
+The runtime connects to the daemon socket at `/run/tightbeam/tightbeam.sock`.
 
 Flags:
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--tools` | yes | — | Comma-separated tool list |
-| `--socket` | yes | — | Path to daemon unix socket |
 | `--max-iterations` | no | 100 | Max tool call rounds per human message |
 | `--max-output-chars` | no | 30000 | Truncate tool output beyond this |
 
@@ -63,7 +62,7 @@ The system prompt is assembled automatically from all `.md` files in `/etc/agent
 
 ### Create an Agent Config
 
-The daemon scans `--agents-dir` for subdirectories containing `tightbeam.toml`. The directory name becomes the agent name. Each `tightbeam.toml` declares the LLM provider and optional MCP servers. Credentials are file paths pointing to platform-mounted secrets.
+Each daemon instance takes a `tightbeam.toml` config file via `--config`. The config declares the LLM provider and optional MCP servers. Credentials are file paths pointing to platform-mounted secrets.
 
 ```toml
 [llm]
@@ -86,16 +85,16 @@ Mount the agent's socket into the container:
 
 ```sh
 docker run \
-    -v <sockets-dir>/my-agent.sock:/run/docker-tightbeam.sock \
+    -v /run/sockets/my-agent.sock:/run/docker-tightbeam.sock \
     your-image
 ```
 
-Conversation logs are written to `<logs-dir>/<agent>/`. Mount them read-only if the agent needs prior context on restart:
+Conversation logs are written to `<logs-dir>/<name>/`. Mount them read-only if the agent needs prior context on restart:
 
 ```sh
 docker run \
-    -v <sockets-dir>/my-agent.sock:/run/docker-tightbeam.sock \
-    -v <logs-dir>/my-agent:/var/log/tightbeam:ro \
+    -v /run/sockets/my-agent.sock:/run/docker-tightbeam.sock \
+    -v /var/log/tightbeam/my-agent:/var/log/tightbeam:ro \
     your-image
 ```
 
@@ -104,20 +103,19 @@ docker run \
 ### Daemon
 
 ```sh
-tightbeam-daemon start --config-dir ... --sockets-dir ... --logs-dir ...
-tightbeam-daemon status --config-dir ... --sockets-dir ... --logs-dir ...
-tightbeam-daemon show <agent> --config-dir ... --sockets-dir ... --logs-dir ...
-tightbeam-daemon logs <agent> --config-dir ... --sockets-dir ... --logs-dir ...
-tightbeam-daemon send <agent> <message> --config-dir ... --sockets-dir ... --logs-dir ...
-tightbeam-daemon send <agent> <message> --file photo.png
-tightbeam-daemon send <agent> <message> --no-wait
-tightbeam-daemon check --config-dir ... --sockets-dir ... --logs-dir ...
+tightbeam-daemon start --name my-agent --config /path/to/tightbeam.toml --logs-dir /path/to/logs
+tightbeam-daemon show --config /path/to/tightbeam.toml
+tightbeam-daemon logs --name my-agent --logs-dir /path/to/logs
+tightbeam-daemon send <message>
+tightbeam-daemon send <message> --file photo.png
+tightbeam-daemon send <message> --no-wait
+tightbeam-daemon check --config /path/to/tightbeam.toml
 tightbeam-daemon version
 ```
 
-All three path flags (`--config-dir`, `--sockets-dir`, `--logs-dir`) are required. `--agents-dir` defaults to `<config-dir>/agents` but can be overridden. All flags also accept environment variables (`TIGHTBEAM_CONFIG_DIR`, `TIGHTBEAM_SOCKETS_DIR`, `TIGHTBEAM_LOGS_DIR`, `TIGHTBEAM_AGENTS_DIR`).
+Three flags (`--name`, `--config`, `--logs-dir`) are required for `start`. All flags also accept environment variables (`TIGHTBEAM_NAME`, `TIGHTBEAM_CONFIG`, `TIGHTBEAM_LOGS_DIR`).
 
-SIGHUP reloads all agent configs, swaps providers, and manages socket lifecycle (adds new agents, removes old ones) without dropping existing connections. Send SIGHUP via `docker kill -s HUP <container>`.
+The daemon socket is always at `/run/tightbeam/tightbeam.sock`. Both daemon and runtime use this path — no configuration needed.
 
 
 ### Runtime
@@ -326,7 +324,7 @@ Subscribers receive text output only. Tool use events are internal to the runtim
 
 ### Agent Config
 
-Each agent directory contains `tightbeam.toml`. The config is self-contained — it declares the LLM provider and MCP servers directly.
+The daemon takes a `tightbeam.toml` config file via `--config`. The config is self-contained — it declares the LLM provider and MCP servers directly.
 
 ```toml
 [llm]
@@ -347,7 +345,7 @@ auth_token_file = "/run/secrets/search_token"
 
 One `[llm]` section required. Zero or more `[mcp.*]` sections.
 
-Credentials use `api_key_file` and `auth_token_file` — paths to files containing the secret value. The daemon reads the file at startup and on SIGHUP reload. The secret is trimmed of whitespace. Config files never contain credentials and are safe to commit.
+Credentials use `api_key_file` and `auth_token_file` — paths to files containing the secret value. The daemon reads the file at startup. The secret is trimmed of whitespace. Config files never contain credentials and are safe to commit.
 
 For local development, create secret files manually:
 ```sh
@@ -392,27 +390,15 @@ Tightbeam owns the conversation. The runtime is stateless.
 
 ## Filesystem Layout
 
-Paths are set by `--config-dir`, `--sockets-dir`, and `--logs-dir`:
+Each daemon instance serves one agent. Paths are set by CLI flags:
 
 ```
-<agents-dir>/
-  my-agent/
-    tightbeam.toml                 # Agent config (LLM provider, MCP servers)
-  deploy-agent/
-    tightbeam.toml
-
-<sockets-dir>/
-  my-agent.sock                    # Per-agent unix socket (mode 0600)
-  deploy-agent.sock
-
-<logs-dir>/
-  my-agent/
-    conversation.ndjson            # Full message log
-  deploy-agent/
-    conversation.ndjson
+--config /etc/tightbeam/agents/my-agent/tightbeam.toml
+--logs-dir /var/log/tightbeam           # logs written to <logs-dir>/<name>/conversation.ndjson
+--name my-agent
 ```
 
-The daemon scans `--agents-dir` for subdirectories containing `tightbeam.toml`. Directory name = agent name.
+The daemon socket is at `/run/tightbeam/tightbeam.sock` (hardcoded, shared via volume mount).
 
 ## Security Model
 
@@ -423,4 +409,4 @@ The daemon scans `--agents-dir` for subdirectories containing `tightbeam.toml`. 
 - MCP servers are configured by the daemon. The runtime has no knowledge of MCP.
 - All messages (user, assistant, tool results) are logged to NDJSON files.
 - Errors are forwarded as-is. Tightbeam does not retry or modify API responses.
-- External message delivery (`send`) goes through the daemon. The daemon queues messages for busy agents and tracks subscribers. Subscribers see agent text output only, never tool call internals.
+- External message delivery (`send`) goes through the daemon. The daemon queues messages for a busy agent and tracks subscribers. Subscribers see agent text output only, never tool call internals.

@@ -1,4 +1,4 @@
-use crate::profile::ResolvedMcp;
+use crate::config::ResolvedMcp;
 use crate::protocol::{ContentBlock, Message, ToolCall, ToolDefinition};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

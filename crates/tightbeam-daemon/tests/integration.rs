@@ -1,15 +1,16 @@
 use async_trait::async_trait;
 use futures::stream;
 use serde::Deserialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tightbeam_daemon::mcp::McpManager;
-use tightbeam_daemon::profile::{AgentConfig, ResolvedLlm, ResolvedMcp};
+use tightbeam_daemon::config::{AgentConfig, ResolvedLlm, ResolvedMcp};
 use tightbeam_daemon::protocol::{Message, ToolDefinition};
 use tightbeam_daemon::{
-    bind_agent_socket, run_daemon, ConversationMap, McpManagerMap, ProfileMap, ProviderMap,
+    bind_agent_socket, run_daemon, Conversation, McpState, Profile,
+    Provider,
 };
 use tightbeam_protocol::framing::{read_frame, write_frame};
 use tightbeam_providers::{LlmProvider, ProviderConfig, StreamEvent};
@@ -99,74 +100,29 @@ async fn start_daemon(
     provider: MockProvider,
     logs_dir: PathBuf,
 ) -> tokio::task::JoinHandle<()> {
-    let mut profiles = HashMap::new();
-    profiles.insert("test-agent".to_string(), make_profile());
-    let profiles: ProfileMap = Arc::new(RwLock::new(profiles));
+    let profile: Profile = Arc::new(make_profile());
+    let conversation: Conversation = Arc::new(RwLock::new(
+        tightbeam_daemon::conversation::ConversationLog::new(&logs_dir.join("test-agent")),
+    ));
 
-    let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
+    let provider: Provider = Arc::from(Box::new(provider) as Box<dyn LlmProvider>);
 
-    let mut providers: HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> =
-        HashMap::new();
-    providers.insert(tightbeam_providers::Provider::Anthropic, Box::new(provider));
-    let providers: ProviderMap = Arc::new(RwLock::new(providers));
-
-    let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
+    let mcp_state: McpState = Arc::new(RwLock::new(McpManager::new(vec![])));
 
     let listener = bind_agent_socket(sock_path).unwrap();
-    let listeners = vec![("test-agent".to_string(), listener)];
-
-    let base = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
-    let sockets_dir = base.join("sockets");
-    let agents_dir = base.join("agents");
 
     tokio::spawn(async move {
         run_daemon(
-            listeners,
-            profiles,
-            conversations,
-            providers,
-            mcp_managers,
+            listener,
+            profile,
+            conversation,
+            provider,
+            mcp_state,
             logs_dir,
-            sockets_dir,
-            agents_dir,
+            "test-agent".to_string(),
         )
         .await;
     })
-}
-
-#[tokio::test]
-async fn zero_agents_daemon_starts() {
-    let profiles: ProfileMap = Arc::new(RwLock::new(HashMap::new()));
-    let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
-    let providers: ProviderMap = Arc::new(RwLock::new(HashMap::new()));
-    let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
-
-    let logs = test_logs_dir("zero-agents");
-    let base = logs.parent().unwrap_or(&logs).to_path_buf();
-    let sockets_dir = base.join("sockets");
-    let agents_dir = base.join("agents");
-
-    let handle = tokio::spawn(async move {
-        run_daemon(
-            vec![],
-            profiles,
-            conversations,
-            providers,
-            mcp_managers,
-            logs,
-            sockets_dir,
-            agents_dir,
-        )
-        .await;
-    });
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        !handle.is_finished(),
-        "daemon should still be running with zero agents"
-    );
-    handle.abort();
-    let _ = std::fs::remove_dir_all(test_logs_dir("zero-agents"));
 }
 
 const REGISTER_FRAME: &str = r#"{"jsonrpc":"2.0","method":"register","params":{"role":"runtime"}}"#;
@@ -648,38 +604,26 @@ mod mcp_integration {
         logs_dir: PathBuf,
         mcp_configs: Vec<ResolvedMcp>,
     ) -> tokio::task::JoinHandle<()> {
-        let mut profiles = HashMap::new();
-        profiles.insert("test-agent".to_string(), make_profile());
-        let profiles: ProfileMap = Arc::new(RwLock::new(profiles));
+        let profile: Profile = Arc::new(make_profile());
+        let conversation: Conversation = Arc::new(RwLock::new(
+            tightbeam_daemon::conversation::ConversationLog::new(&logs_dir.join("test-agent")),
+        ));
 
-        let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
+        let provider: Provider = Arc::from(Box::new(provider) as Box<dyn LlmProvider>);
 
-        let mut providers: HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> =
-            HashMap::new();
-        providers.insert(tightbeam_providers::Provider::Anthropic, Box::new(provider));
-        let providers: ProviderMap = Arc::new(RwLock::new(providers));
-
-        let mut mcp_map = HashMap::new();
-        mcp_map.insert("test-agent".to_string(), McpManager::new(mcp_configs));
-        let mcp_managers: McpManagerMap = Arc::new(RwLock::new(mcp_map));
+        let mcp_state: McpState = Arc::new(RwLock::new(McpManager::new(mcp_configs)));
 
         let listener = bind_agent_socket(sock_path).unwrap();
-        let listeners = vec![("test-agent".to_string(), listener)];
-
-        let base = logs_dir.parent().unwrap_or(&logs_dir).to_path_buf();
-        let sockets_dir = base.join("sockets");
-        let agents_dir = base.join("agents");
 
         tokio::spawn(async move {
             run_daemon(
-                listeners,
-                profiles,
-                conversations,
-                providers,
-                mcp_managers,
+                listener,
+                profile,
+                conversation,
+                provider,
+                mcp_state,
                 logs_dir,
-                sockets_dir,
-                agents_dir,
+                "test-agent".to_string(),
             )
             .await;
         })
@@ -1047,13 +991,10 @@ mod mcp_integration {
 #[tokio::test]
 async fn smoke_full_startup_path() {
     let base = tempfile::tempdir().unwrap();
-    let agents_dir = base.path().join("agents");
-    let agent_dir = agents_dir.join("smoke-agent");
     let sockets_dir = base.path().join("sockets");
     let logs_dir = base.path().join("logs");
     let secrets_dir = base.path().join("secrets");
 
-    std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::create_dir_all(&sockets_dir).unwrap();
     std::fs::create_dir_all(&logs_dir).unwrap();
     std::fs::create_dir_all(&secrets_dir).unwrap();
@@ -1061,8 +1002,9 @@ async fn smoke_full_startup_path() {
     let key_path = secrets_dir.join("api_key");
     std::fs::write(&key_path, "smoke-test-key").unwrap();
 
+    let config_path = base.path().join("tightbeam.toml");
     std::fs::write(
-        agent_dir.join("tightbeam.toml"),
+        &config_path,
         format!(
             "[llm]\nprovider = \"anthropic\"\nmodel = \"smoke-model\"\napi_key_file = \"{}\"",
             key_path.display()
@@ -1070,12 +1012,10 @@ async fn smoke_full_startup_path() {
     )
     .unwrap();
 
-    // Step 1: Directory scanning + secret file reading
-    let configs = tightbeam_daemon::registration::load_agents(&agents_dir).unwrap();
-    assert_eq!(configs.len(), 1);
-    assert!(configs.contains_key("smoke-agent"));
-    assert_eq!(configs["smoke-agent"].llm.api_key, "smoke-test-key");
-    assert_eq!(configs["smoke-agent"].llm.model, "smoke-model");
+    // Step 1: Load config directly + verify secret file reading
+    let agent_config = AgentConfig::load(&config_path).unwrap();
+    assert_eq!(agent_config.llm.api_key, "smoke-test-key");
+    assert_eq!(agent_config.llm.model, "smoke-model");
 
     // Step 2: Bind socket, start daemon with MockProvider
     let sock_path = sockets_dir.join("smoke-agent.sock");
@@ -1090,36 +1030,25 @@ async fn smoke_full_startup_path() {
         },
     ]]);
 
-    let mut profiles = HashMap::new();
-    profiles.insert(
-        "smoke-agent".to_string(),
-        configs.into_values().next().unwrap(),
-    );
-    let profiles: ProfileMap = Arc::new(RwLock::new(profiles));
+    let profile: Profile = Arc::new(agent_config);
 
-    let mut providers_map: HashMap<tightbeam_providers::Provider, Box<dyn LlmProvider>> =
-        HashMap::new();
-    providers_map.insert(tightbeam_providers::Provider::Anthropic, Box::new(provider));
-    let providers: ProviderMap = Arc::new(RwLock::new(providers_map));
+    let provider: Provider = Arc::from(Box::new(provider) as Box<dyn LlmProvider>);
 
-    let conversations: ConversationMap = Arc::new(RwLock::new(HashMap::new()));
-    let mcp_managers: McpManagerMap = Arc::new(RwLock::new(HashMap::new()));
-
-    let listeners = vec![("smoke-agent".to_string(), listener)];
+    let conversation: Conversation = Arc::new(RwLock::new(
+        tightbeam_daemon::conversation::ConversationLog::new(&logs_dir.join("smoke-agent")),
+    ));
+    let mcp_state: McpState = Arc::new(RwLock::new(McpManager::new(vec![])));
 
     let logs = logs_dir.clone();
-    let sockets = sockets_dir.clone();
-    let agents = agents_dir.clone();
     tokio::spawn(async move {
         run_daemon(
-            listeners,
-            profiles,
-            conversations,
-            providers,
-            mcp_managers,
+            listener,
+            profile,
+            conversation,
+            provider,
+            mcp_state,
             logs,
-            sockets,
-            agents,
+            "smoke-agent".to_string(),
         )
         .await;
     });

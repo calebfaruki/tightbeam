@@ -1,5 +1,7 @@
 pub mod framing;
 
+pub const SOCKET_PATH: &str = "/run/tightbeam/tightbeam.sock";
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
