@@ -89,6 +89,8 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +133,8 @@ pub struct TurnRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
     pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +199,7 @@ mod serialization {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
+            agent: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("tool_calls"));
@@ -219,6 +224,7 @@ mod serialization {
             }]),
             tool_call_id: None,
             is_error: None,
+            agent: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: Message = serde_json::from_str(&json).unwrap();
@@ -234,6 +240,7 @@ mod serialization {
             tool_calls: None,
             tool_call_id: Some("tc-1".into()),
             is_error: Some(true),
+            agent: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"is_error\":true"));
@@ -316,7 +323,9 @@ mod serialization {
                 tool_calls: None,
                 tool_call_id: Some("tc-1".into()),
                 is_error: None,
+                agent: None,
             }],
+            agent: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("\"system\""));
@@ -339,7 +348,9 @@ mod serialization {
                 tool_calls: None,
                 tool_call_id: None,
                 is_error: None,
+                agent: None,
             }],
+            agent: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: TurnRequest = serde_json::from_str(&json).unwrap();
@@ -434,6 +445,7 @@ mod serialization {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
+            agent: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("content"));

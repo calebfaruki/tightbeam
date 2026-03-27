@@ -113,13 +113,14 @@ async fn call_llm(
     conversation: &mut ConversationLog,
     provider: &dyn LlmProvider,
     config: &ProviderConfig,
+    agent: Option<&str>,
 ) -> Result<LlmResult, Box<dyn std::error::Error + Send + Sync>> {
     let tools = conversation.tools();
-    let history = conversation.history();
+    let prefixed = conversation.history_for_provider();
     let system = conversation.system_prompt();
 
     let mut stream = provider
-        .call(history, system, &tools, config)
+        .call(&prefixed, system, &tools, config)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
@@ -177,8 +178,13 @@ async fn call_llm(
         tool_calls: none_if_empty(tool_calls.clone()),
         tool_call_id: None,
         is_error: None,
+        agent: agent.map(String::from),
     };
-    conversation.append(assistant_msg)?;
+    if agent == Some("router") {
+        conversation.audit_log(&assistant_msg)?;
+    } else {
+        conversation.append(assistant_msg)?;
+    }
 
     Ok(LlmResult {
         stop_reason,
@@ -266,6 +272,8 @@ async fn handle_turn(
     writer: &mut (impl AsyncWriteExt + Unpin),
     ctx: &mut TurnContext<'_>,
 ) -> Result<StopReason, Box<dyn std::error::Error + Send + Sync>> {
+    let agent = params.agent.as_deref();
+
     if let Some(system) = params.system {
         ctx.conversation.set_system_prompt(system);
     }
@@ -323,6 +331,7 @@ async fn handle_turn(
             ctx.conversation,
             ctx.provider,
             ctx.config,
+            agent,
         )
         .await
         {

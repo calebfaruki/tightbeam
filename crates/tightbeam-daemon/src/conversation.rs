@@ -1,6 +1,7 @@
 use crate::protocol::{ContentBlock, Message, ToolDefinition};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,8 @@ struct LogEntry {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     is_error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
 }
 
 pub struct ConversationLog {
@@ -60,6 +63,7 @@ impl ConversationLog {
                     tool_calls: entry.tool_calls,
                     tool_call_id: entry.tool_call_id,
                     is_error: entry.is_error,
+                    agent: entry.agent,
                 });
             }
         }
@@ -112,8 +116,49 @@ impl ConversationLog {
         &self.messages
     }
 
+    pub fn audit_log(&self, message: &Message) -> Result<(), String> {
+        let audit_path = self.log_path.with_file_name("router.ndjson");
+        Self::write_entry(&audit_path, message)
+    }
+
+    pub fn history_for_provider(&self) -> Vec<Message> {
+        let agents: HashSet<&str> = self
+            .messages
+            .iter()
+            .filter_map(|m| m.agent.as_deref())
+            .collect();
+
+        if agents.len() < 2 {
+            return self.messages.clone();
+        }
+
+        self.messages
+            .iter()
+            .map(|m| {
+                if m.role != "assistant" {
+                    return m.clone();
+                }
+                let agent_name = match &m.agent {
+                    Some(name) => name,
+                    None => return m.clone(),
+                };
+                let mut msg = m.clone();
+                if let Some(ref mut blocks) = msg.content {
+                    if let Some(ContentBlock::Text { ref mut text }) = blocks.first_mut() {
+                        *text = format!("[{agent_name}]: {text}");
+                    }
+                }
+                msg
+            })
+            .collect()
+    }
+
     fn write_to_log(&self, message: &Message) -> Result<(), String> {
-        if let Some(parent) = self.log_path.parent() {
+        Self::write_entry(&self.log_path, message)
+    }
+
+    fn write_entry(path: &Path, message: &Message) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("failed to create log dir: {e}"))?;
         }
 
@@ -124,6 +169,7 @@ impl ConversationLog {
             tool_calls: message.tool_calls.clone(),
             tool_call_id: message.tool_call_id.clone(),
             is_error: message.is_error,
+            agent: message.agent.clone(),
         };
 
         let mut line = serde_json::to_string(&entry)
@@ -133,7 +179,7 @@ impl ConversationLog {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.log_path)
+            .open(path)
             .map_err(|e| format!("failed to open log file: {e}"))?;
 
         file.write_all(line.as_bytes())
@@ -155,6 +201,7 @@ mod conversation_accumulation {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
+            agent: None,
         }
     }
 
@@ -233,6 +280,7 @@ mod conversation_accumulation {
             tool_calls: None,
             tool_call_id: Some("tc-001".into()),
             is_error: None,
+            agent: None,
         };
         log.append(msg).unwrap();
 
@@ -290,6 +338,7 @@ mod conversation_accumulation {
             }]),
             tool_call_id: None,
             is_error: None,
+            agent: None,
         };
         log.append(msg).unwrap();
 
@@ -311,6 +360,95 @@ mod conversation_accumulation {
         assert!(
             ConversationLog::rebuild(tmp.path()).is_err(),
             "should fail on corrupted log entry"
+        );
+    }
+
+    #[test]
+    fn audit_log_writes_to_router_ndjson_not_history() {
+        let tmp = TempDir::new().unwrap();
+        let log = ConversationLog::new(tmp.path());
+
+        let msg = Message {
+            role: "assistant".into(),
+            content: Some(ContentBlock::text_content("research")),
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: None,
+            agent: Some("router".into()),
+        };
+        log.audit_log(&msg).unwrap();
+
+        assert!(log.history().is_empty(), "audit_log must not add to history");
+        let audit_path = tmp.path().join("router.ndjson");
+        assert!(audit_path.exists(), "audit log file must be created");
+        let content = fs::read_to_string(&audit_path).unwrap();
+        assert!(content.contains("\"agent\":\"router\""));
+    }
+
+    #[test]
+    fn agent_attribution_round_trips_through_rebuild() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut log = ConversationLog::new(tmp.path());
+            log.append(text_msg("user", "Hello")).unwrap();
+            let mut assistant = text_msg("assistant", "Hi there");
+            assistant.agent = Some("research".into());
+            log.append(assistant).unwrap();
+        }
+
+        let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
+        assert_eq!(rebuilt.history().len(), 2);
+        assert_eq!(rebuilt.history()[1].agent.as_deref(), Some("research"));
+    }
+
+    #[test]
+    fn history_for_provider_no_prefix_single_agent() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append(text_msg("user", "Hello")).unwrap();
+        let mut msg = text_msg("assistant", "Hi there");
+        msg.agent = Some("research".into());
+        log.append(msg).unwrap();
+
+        let history = log.history_for_provider();
+        assert_eq!(
+            crate::protocol::content_text(&history[1].content),
+            Some("Hi there"),
+            "single agent should not prefix"
+        );
+    }
+
+    #[test]
+    fn history_for_provider_prefixes_multi_agent() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append(text_msg("user", "Hello")).unwrap();
+
+        let mut msg1 = text_msg("assistant", "Analysis here");
+        msg1.agent = Some("research".into());
+        log.append(msg1).unwrap();
+
+        log.append(text_msg("user", "Write it up")).unwrap();
+
+        let mut msg2 = text_msg("assistant", "Draft here");
+        msg2.agent = Some("writer".into());
+        log.append(msg2).unwrap();
+
+        let history = log.history_for_provider();
+        assert_eq!(
+            crate::protocol::content_text(&history[1].content),
+            Some("[research]: Analysis here"),
+        );
+        assert_eq!(
+            crate::protocol::content_text(&history[3].content),
+            Some("[writer]: Draft here"),
+        );
+        assert_eq!(
+            crate::protocol::content_text(&history[0].content),
+            Some("Hello"),
+            "user messages should not be prefixed"
         );
     }
 }

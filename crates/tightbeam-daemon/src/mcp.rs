@@ -14,6 +14,7 @@ pub(crate) fn tool_result_message(
         tool_calls: None,
         tool_call_id: Some(tool_call_id),
         is_error: if is_error { Some(true) } else { None },
+        agent: None,
     }
 }
 

@@ -21,7 +21,7 @@ async fn main() {
         }
     };
 
-    if let Err(e) = agent::run_agent(config, Path::new(config::AGENT_DIR)).await {
+    if let Err(e) = agent::run_agent(config, Path::new(config::AGENTS_DIR)).await {
         eprintln!("tightbeam-runtime: {e}");
         std::process::exit(1);
     }

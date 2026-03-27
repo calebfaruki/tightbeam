@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-pub(crate) const AGENT_DIR: &str = "/etc/agent";
+pub(crate) const AGENTS_DIR: &str = "/etc/agents";
 use tightbeam_protocol::SOCKET_PATH;
 
 pub(crate) struct RuntimeConfig {

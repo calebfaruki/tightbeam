@@ -279,6 +279,7 @@ mod claude_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
+            agent: None,
         }];
         let api = build_api_messages(&messages);
         assert_eq!(api.len(), 1);
@@ -299,6 +300,7 @@ mod claude_api {
             }]),
             tool_call_id: None,
             is_error: None,
+            agent: None,
         }];
         let api = build_api_messages(&messages);
         let content = api[0]["content"].as_array().unwrap();
@@ -315,6 +317,7 @@ mod claude_api {
             tool_calls: None,
             tool_call_id: Some("tc-1".into()),
             is_error: None,
+            agent: None,
         }];
         let api = build_api_messages(&messages);
         assert_eq!(api[0]["role"], "user");
@@ -335,6 +338,7 @@ mod claude_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
+            agent: None,
         }];
         let api = build_api_messages(&messages);
         let content = api[0]["content"].as_array().unwrap();
@@ -355,6 +359,7 @@ mod claude_api {
             tool_calls: None,
             tool_call_id: None,
             is_error: None,
+            agent: None,
         }];
         build_api_messages(&messages);
     }

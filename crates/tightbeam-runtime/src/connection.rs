@@ -181,7 +181,9 @@ mod connection_tests {
                 tool_calls: None,
                 tool_call_id: None,
                 is_error: None,
+                agent: None,
             }],
+            agent: None,
         };
 
         let id = conn.send_turn(&request).await.unwrap();
@@ -281,6 +283,7 @@ mod connection_tests {
             system: None,
             tools: None,
             messages: vec![],
+            agent: None,
         };
 
         let id1 = conn.send_turn(&request).await.unwrap();
