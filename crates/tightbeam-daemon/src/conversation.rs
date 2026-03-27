@@ -74,9 +74,7 @@ impl ConversationLog {
     }
 
     pub fn set_system_prompt(&mut self, prompt: String) {
-        if self.system_prompt.is_none() {
-            self.system_prompt = Some(prompt);
-        }
+        self.system_prompt = Some(prompt);
     }
 
     pub fn system_prompt(&self) -> Option<&str> {
@@ -213,15 +211,15 @@ mod conversation_accumulation {
     }
 
     #[test]
-    fn system_prompt_cached_on_first_set() {
+    fn system_prompt_updates_on_each_set() {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(tmp.path());
 
         log.set_system_prompt("You are helpful.".into());
         assert_eq!(log.system_prompt(), Some("You are helpful."));
 
-        log.set_system_prompt("Ignored.".into());
-        assert_eq!(log.system_prompt(), Some("You are helpful."));
+        log.set_system_prompt("Updated.".into());
+        assert_eq!(log.system_prompt(), Some("Updated."));
     }
 
     #[test]

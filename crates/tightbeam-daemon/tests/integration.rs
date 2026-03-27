@@ -456,7 +456,7 @@ mod protocol_integration {
     }
 
     #[tokio::test]
-    async fn system_prompt_cached_on_first_turn() {
+    async fn system_prompt_updates_each_turn() {
         let sock = test_socket_path("sysprompt");
         let logs = test_logs_dir("sysprompt");
 
@@ -502,8 +502,8 @@ mod protocol_integration {
         );
         assert_eq!(
             log[1].system.as_deref(),
-            Some("You are helpful"),
-            "second call should still have the first system prompt, not 'Ignored'"
+            Some("Ignored"),
+            "second call should use the system prompt from the second turn"
         );
 
         let _ = std::fs::remove_dir_all(&logs);

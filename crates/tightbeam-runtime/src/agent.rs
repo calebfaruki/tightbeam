@@ -8,11 +8,9 @@ use tightbeam_protocol::{ContentBlock, Message, StopReason, TurnRequest};
 pub(crate) async fn run_agent(config: RuntimeConfig, agent_dir: &Path) -> Result<(), String> {
     let system_prompt = crate::prompt::load_system_prompt(agent_dir).await?;
 
-    let tool_defs = tools::tool_definitions(&config.tools);
+    let mut tool_defs = Some(tools::tool_definitions(&config.tools));
 
     let mut conn = DaemonConnection::connect(&config.socket_path).await?;
-
-    let mut first_turn = true;
 
     loop {
         let human = conn.wait_for_human_message().await?;
@@ -25,19 +23,10 @@ pub(crate) async fn run_agent(config: RuntimeConfig, agent_dir: &Path) -> Result
             is_error: None,
         };
 
-        let request = if first_turn {
-            first_turn = false;
-            TurnRequest {
-                system: Some(system_prompt.clone()),
-                tools: Some(tool_defs.clone()),
-                messages: vec![user_msg],
-            }
-        } else {
-            TurnRequest {
-                system: None,
-                tools: None,
-                messages: vec![user_msg],
-            }
+        let request = TurnRequest {
+            system: Some(system_prompt.clone()),
+            tools: tool_defs.take(),
+            messages: vec![user_msg],
         };
 
         let mut id = conn.send_turn(&request).await?;
@@ -200,7 +189,7 @@ mod agent_tests {
     }
 
     #[tokio::test]
-    async fn agent_sends_system_and_tools_on_first_turn() {
+    async fn agent_sends_system_every_turn_and_tools_on_first() {
         let (agent_handle, mut mock, _tmp) = setup_agent("first", 100).await;
 
         mock.send_human_message("Hello").await;
@@ -230,11 +219,14 @@ mod agent_tests {
         )
         .await;
 
-        // Send second human message — should NOT have system/tools
+        // Send second human message — system included, tools omitted
         mock.send_human_message("Second").await;
         let turn2 = mock.read_turn().await;
 
-        assert!(turn2["params"].get("system").is_none() || turn2["params"]["system"].is_null());
+        assert_eq!(
+            turn2["params"]["system"], "You are a test agent.",
+            "system prompt must be sent on every turn"
+        );
         assert!(turn2["params"].get("tools").is_none() || turn2["params"]["tools"].is_null());
         assert_eq!(
             turn2["params"]["messages"][0]["content"][0]["text"],
