@@ -12,7 +12,7 @@ Two components:
 
 2. **Daemon** — a sidecar process in the daemon container, one per agent. Listens on a unix socket, reads API credentials from mounted secret files, manages conversation history, forwards requests to the LLM provider, and executes MCP tool calls on behalf of the agent.
 
-Each agent gets its own daemon instance with a `tightbeam.toml` config declaring the LLM provider, model, MCP servers, and secret file paths.
+Each agent gets its own daemon instance. LLM config (provider, model, API key) comes from k8s Secret volume mounts at `/run/secrets/llm/`. MCP servers are declared as subdirectories of `/etc/tightbeam/mcp/`.
 
 The runtime sends new messages via `turn` requests over a length-prefixed binary framing protocol. The daemon reads the API key from a secret file, forwards to the LLM provider, and streams the response back. When the LLM requests MCP tools (GitHub, web search, etc.), the daemon executes them directly. Every exchange is logged to NDJSON files.
 
@@ -60,24 +60,36 @@ Available tools: `bash`, `read_file`, `write_file`, `list_directory`.
 
 The system prompt is assembled automatically from all `.md` files in `/etc/agent/` inside the container. Files are sorted by path and concatenated, supporting both single-file and multi-file layouts.
 
-### Create an Agent Config
+### LLM Config (k8s Secret Mount)
 
-Each daemon instance reads its config from `/etc/tightbeam/tightbeam.toml`. The config declares the LLM provider and optional MCP servers. Credentials are file paths pointing to platform-mounted secrets.
+LLM config is read from files mounted at `/run/secrets/llm/`:
 
-```toml
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_file = "/run/secrets/anthropic_api_key"
-max_tokens = 8192
-
-[mcp.github]
-url = "https://mcp.github.com/sse"
-auth_token_file = "/run/secrets/github_token"
-tools = ["create_pull_request", "list_issues"]
+```
+/run/secrets/llm/provider     -> "anthropic"
+/run/secrets/llm/model         -> "claude-sonnet-4-20250514"
+/run/secrets/llm/api-key       -> "sk-ant-..."
+/run/secrets/llm/max-tokens    -> "8192"          # optional, defaults to 8192
 ```
 
-One `[llm]` section required. Zero or more `[mcp.*]` sections.
+The daemon reads these files at startup. Missing `provider`, `model`, or `api-key` is a hard error. Values are trimmed of whitespace.
+
+In k8s, these are populated by a Secret volume mount. The orchestrator creates the Secret and mounts it into the daemon container.
+
+### MCP Config (Mounted Directory)
+
+MCP servers are declared as subdirectories of `/etc/tightbeam/mcp/`:
+
+```
+/etc/tightbeam/mcp/
+  github/
+    url           # "https://mcp.github.com/sse" (required)
+    auth_token    # "ghp_xxxx" (optional — absent means no auth)
+    tools         # one tool name per line (optional — absent means all)
+  filesystem/
+    url           # "http://localhost:9100/sse"
+```
+
+Each subdirectory is one MCP server. The subdirectory name is the server's logical name. If the directory is empty or doesn't exist, the daemon starts with zero MCP servers.
 
 ### Docker Run
 
@@ -104,7 +116,6 @@ docker run \
 
 ```sh
 tightbeam-daemon start
-tightbeam-daemon show
 tightbeam-daemon logs
 tightbeam-daemon send <message>
 tightbeam-daemon check
@@ -112,7 +123,8 @@ tightbeam-daemon version
 ```
 
 No flags. All paths are hardcoded:
-- Config: `/etc/tightbeam/tightbeam.toml`
+- LLM config: `/run/secrets/llm/`
+- MCP config: `/etc/tightbeam/mcp/`
 - Socket: `/run/tightbeam/tightbeam.sock`
 - Logs: `/var/log/tightbeam/conversation.ndjson`
 
@@ -325,45 +337,42 @@ Subscribers receive text output only. Tool use events are internal to the runtim
 
 ### Agent Config
 
-The daemon reads `/etc/tightbeam/tightbeam.toml`. The config is self-contained — it declares the LLM provider and MCP servers directly.
+Config comes from two sources:
 
-```toml
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_file = "/run/secrets/anthropic_api_key"
-max_tokens = 8192                              # optional, defaults to 8192
+**LLM** — k8s Secret volume mounted at `/run/secrets/llm/`:
 
-[mcp.github]
-url = "https://mcp.github.com/sse"
-auth_token_file = "/run/secrets/github_token"
-tools = ["create_pull_request", "list_issues"]
-
-[mcp.web-search]
-url = "https://mcp.search.example.com/sse"
-auth_token_file = "/run/secrets/search_token"
+```
+/run/secrets/llm/provider     -> "anthropic"
+/run/secrets/llm/model         -> "claude-sonnet-4-20250514"
+/run/secrets/llm/api-key       -> "sk-ant-..."
+/run/secrets/llm/max-tokens    -> "8192"          # optional, defaults to 8192
 ```
 
-One `[llm]` section required. Zero or more `[mcp.*]` sections.
+Missing `provider`, `model`, or `api-key` is a hard error. Values are trimmed of whitespace.
 
-Credentials use `api_key_file` and `auth_token_file` — paths to files containing the secret value. The daemon reads the file at startup. The secret is trimmed of whitespace. Config files never contain credentials and are safe to commit.
+**MCP** — subdirectories of `/etc/tightbeam/mcp/`:
 
-For local development, create secret files manually:
-```sh
-echo -n "sk-ant-..." > /run/secrets/anthropic_api_key
+```
+/etc/tightbeam/mcp/
+  github/
+    url           # "https://mcp.github.com/sse" (required)
+    auth_token    # "ghp_xxxx" (optional — absent means no auth)
+    tools         # one tool name per line (optional — absent means all)
+  web-search/
+    url           # "https://mcp.search.example.com/sse"
+    auth_token    # "search-token-xxx"
 ```
 
-For containerized deployments, secrets are mounted by the platform (Docker secrets at `/run/secrets/`, k8s Secret volumes).
+Each subdirectory is one MCP server. The subdirectory name is the server's logical name. If the directory is empty or doesn't exist, zero MCP servers.
 
 ### MCP Tool Allowlists
 
-The `tools` field on `[mcp.*]` sections controls which tools the LLM can call:
+The `tools` file in each MCP server subdirectory controls which tools the LLM can call:
 
 | Value | Meaning |
 |-------|---------|
-| omitted | Allow all tools from the server |
-| `tools = []` | Allow none (server disabled) |
-| `tools = ["x", "y"]` | Allow only named tools |
+| file absent | Allow all tools from the server |
+| file present, one name per line | Allow only named tools |
 
 ## MCP Support
 
@@ -375,7 +384,7 @@ When the LLM returns tool calls, the daemon partitions them:
 - **All MCP** — daemon executes them, appends results to conversation, calls the LLM again. The runtime waits and receives the final response.
 - **Mixed** — daemon executes MCP calls immediately, returns only the local calls to the runtime. When the runtime sends back local results, the daemon interleaves all results in the original call order and continues.
 
-MCP connections are lazy (first turn, not startup) and cached for the session. Auth uses Bearer tokens read from `auth_token_file`. If a connection drops mid-session, the daemon retries once.
+MCP connections are lazy (first turn, not startup) and cached for the session. Auth uses Bearer tokens read from the `auth_token` file. If a connection drops mid-session, the daemon retries once.
 
 ## Conversation Ownership
 
@@ -391,19 +400,20 @@ Tightbeam owns the conversation. The runtime is stateless.
 
 ## Filesystem Layout
 
-Each daemon instance serves one agent. Paths are set by CLI flags:
+Each daemon instance serves one agent. All paths are hardcoded:
 
 ```
-/etc/tightbeam/tightbeam.toml               # agent config
+/run/secrets/llm/                           # LLM config (k8s Secret mount)
+/etc/tightbeam/mcp/                         # MCP server configs (mounted directory)
 /run/tightbeam/tightbeam.sock               # unix socket (mode 0600)
 /var/log/tightbeam/conversation.ndjson      # conversation log
 ```
 
-All paths are hardcoded. The orchestrator mounts configs and secrets at these locations.
+The orchestrator mounts secrets and configs at these locations.
 
 ## Security Model
 
-- Credentials are read from mounted secret files (`api_key_file`, `auth_token_file`). Config files never contain secrets and are safe to commit.
+- LLM credentials are read from k8s Secret volume mounts at `/run/secrets/llm/`. MCP credentials are read from `auth_token` files in `/etc/tightbeam/mcp/<server>/`.
 - API keys and MCP auth tokens never cross the socket boundary.
 - The agent does not know which model or provider it talks to.
 - LLM provider is swappable at the config layer without agent changes.

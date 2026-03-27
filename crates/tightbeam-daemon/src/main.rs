@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tightbeam_protocol::framing::{read_frame, write_frame};
-use tightbeam_protocol::{CONFIG_PATH, LOGS_PATH, SOCKET_PATH};
+use tightbeam_protocol::{LOGS_PATH, SOCKET_PATH};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
@@ -100,13 +100,6 @@ async fn main() {
         "version" => {
             println!("tightbeam-daemon {}", env!("CARGO_PKG_VERSION"));
         }
-        "show" => match std::fs::read_to_string(CONFIG_PATH) {
-            Ok(content) => print!("{content}"),
-            Err(e) => {
-                eprintln!("tightbeam: failed to read config: {e}");
-                std::process::exit(1);
-            }
-        },
         "logs" => match std::fs::read_to_string(LOGS_PATH) {
             Ok(content) => print!("{content}"),
             Err(e) => {
@@ -120,7 +113,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        "check" => match AgentConfig::load(Path::new(CONFIG_PATH)) {
+        "check" => match AgentConfig::load() {
             Ok(_) => println!("  ok"),
             Err(e) => {
                 eprintln!("  FAIL {e}");
@@ -134,12 +127,13 @@ async fn main() {
                 )
                 .init();
 
-            let agent_config = AgentConfig::load(Path::new(CONFIG_PATH)).unwrap_or_else(|e| {
+            let agent_config = AgentConfig::load().unwrap_or_else(|e| {
                 eprintln!("tightbeam: {e}");
                 std::process::exit(1);
             });
 
-            tracing::info!("loaded config from {CONFIG_PATH}");
+            let mcp_count = agent_config.mcp_servers.len();
+            tracing::info!("loaded LLM config, {mcp_count} MCP server(s)");
 
             let socket_path = Path::new(SOCKET_PATH);
             if let Some(parent) = socket_path.parent() {
@@ -191,7 +185,7 @@ async fn main() {
             run_daemon(listener, profile, conversation, provider, mcp_state).await;
         }
         _ => {
-            eprintln!("usage: tightbeam-daemon <start|show|logs|send|check|version>");
+            eprintln!("usage: tightbeam-daemon <start|logs|send|check|version>");
             std::process::exit(1);
         }
     }

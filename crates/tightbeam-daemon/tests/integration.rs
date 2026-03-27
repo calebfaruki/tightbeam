@@ -972,29 +972,19 @@ async fn smoke_full_startup_path() {
     let base = tempfile::tempdir().unwrap();
     let sockets_dir = base.path().join("sockets");
     let logs_dir = base.path().join("logs");
-    let secrets_dir = base.path().join("secrets");
 
     std::fs::create_dir_all(&sockets_dir).unwrap();
     std::fs::create_dir_all(&logs_dir).unwrap();
-    std::fs::create_dir_all(&secrets_dir).unwrap();
 
-    let key_path = secrets_dir.join("api_key");
-    std::fs::write(&key_path, "smoke-test-key").unwrap();
-
-    let config_path = base.path().join("tightbeam.toml");
-    std::fs::write(
-        &config_path,
-        format!(
-            "[llm]\nprovider = \"anthropic\"\nmodel = \"smoke-model\"\napi_key_file = \"{}\"",
-            key_path.display()
-        ),
-    )
-    .unwrap();
-
-    // Step 1: Load config directly + verify secret file reading
-    let agent_config = AgentConfig::load(&config_path).unwrap();
-    assert_eq!(agent_config.llm.api_key, "smoke-test-key");
-    assert_eq!(agent_config.llm.model, "smoke-model");
+    let agent_config = AgentConfig {
+        llm: ResolvedLlm {
+            provider: tightbeam_providers::Provider::Anthropic,
+            model: "smoke-model".into(),
+            api_key: "smoke-test-key".into(),
+            max_tokens: 8192,
+        },
+        mcp_servers: Vec::new(),
+    };
 
     // Step 2: Bind socket, start daemon with MockProvider
     let sock_path = sockets_dir.join("smoke-agent.sock");

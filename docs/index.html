@@ -189,19 +189,15 @@ docker run -e OPENAI_API_KEY=sk-... agent-image</pre>
     <section class="mb-20">
       <h2 class="border-b border-white/20 text-lg font-medium mb-6">Quick start</h2>
 
-      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Agent config directory (mounted into daemon container)</span>
-mkdir -p agents/my-agent
+      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># LLM config comes from k8s Secret volume mounted at /run/secrets/llm/</span>
+<span class="text-gray-600"># The orchestrator creates the Secret and mounts it into the daemon container</span>
 
-<span class="text-gray-600"># Agent config — LLM provider + secret file path</span>
-cat > agents/my-agent/tightbeam.toml &lt;&lt; 'EOF'
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_file = "/run/secrets/anthropic_api_key"
-EOF
+/run/secrets/llm/provider     <span class="text-gray-600"># "anthropic"</span>
+/run/secrets/llm/model        <span class="text-gray-600"># "claude-sonnet-4-20250514"</span>
+/run/secrets/llm/api-key      <span class="text-gray-600"># "sk-ant-..."</span>
+/run/secrets/llm/max-tokens   <span class="text-gray-600"># "8192" (optional, defaults to 8192)</span>
 
-<span class="text-gray-600"># Daemon takes --config pointing to a tightbeam.toml file</span>
-<span class="text-gray-600"># Docker Compose or Helm mounts configs and secrets into the daemon container</span></pre>
+<span class="text-gray-600"># Daemon reads these files at startup — no env vars, no TOML for LLM config</span></pre>
     </section>
 
     <!-- Security -->

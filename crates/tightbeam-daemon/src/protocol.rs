@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub use tightbeam_protocol::{
     content_text, framing, ContentBlock, Message, StopReason, StreamData, ToolCall, ToolDefinition,
-    TurnRequest, TurnResponse,
+    TurnRequest,
 };
 
 // --- Inbound requests (container → tightbeam) ---
