@@ -1,7 +1,7 @@
 use std::path::Path;
 
 pub(crate) const LLM_SECRETS_DIR: &str = "/run/secrets/llm";
-pub(crate) const MCP_CONFIG_DIR: &str = "/etc/tightbeam/mcp";
+pub(crate) const MCP_CONFIG_DIR: &str = "/run/secrets/mcp";
 
 #[derive(Debug)]
 pub struct AgentConfig {
