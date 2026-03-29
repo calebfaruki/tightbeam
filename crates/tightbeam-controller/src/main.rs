@@ -49,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     if kube_client.is_some() {
+        let (ready_tx, mut ready_rx) = tokio::sync::watch::channel(false);
+
         let watcher_state = state.clone();
         let watcher_ns = namespace;
         tokio::spawn(async move {
@@ -62,12 +64,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             if let Err(e) =
-                tightbeam_controller::watcher::watch_models(client, &watcher_ns, watcher_state)
+                tightbeam_controller::watcher::watch_models(client, &watcher_ns, watcher_state, ready_tx)
                     .await
             {
                 tracing::error!("model watcher failed: {e}");
             }
         });
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            ready_rx.wait_for(|&v| v),
+        )
+        .await
+        {
+            Ok(Ok(_)) => tracing::info!("watcher initial sync complete"),
+            Ok(Err(_)) => tracing::warn!("watcher channel closed before sync"),
+            Err(_) => tracing::warn!("watcher sync timed out after 10s, serving anyway"),
+        };
     }
 
     let service = ControllerService::new(state);
@@ -75,7 +88,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{DEFAULT_GRPC_PORT}").parse()?;
     tracing::info!("tightbeam-controller listening on {addr}");
 
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<TightbeamControllerServer<ControllerService>>()
+        .await;
+
     Server::builder()
+        .add_service(health_service)
         .add_service(TightbeamControllerServer::new(service))
         .serve(addr)
         .await?;

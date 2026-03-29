@@ -135,11 +135,20 @@ impl TightbeamController for ControllerService {
             conv.set_system_prompt(system);
         }
 
+        let job_action = self.state.check_job_needed().await;
+        if matches!(job_action, crate::state::JobAction::NoModelSpec) {
+            return Err(Status::failed_precondition(
+                "no TightbeamModel configured",
+            ));
+        }
+
         let incoming: Vec<provider::Message> = params
             .messages
             .iter()
             .map(proto_message_to_provider)
             .collect();
+
+        let rollback_len = conv.len();
 
         conv.append_many(incoming)
             .map_err(|e| Status::internal(format!("conversation append: {e}")))?;
@@ -147,10 +156,7 @@ impl TightbeamController for ControllerService {
         let history = conv.history_for_provider();
         let system = conv.system_prompt().map(String::from);
 
-        drop(conv);
-        tracing::info!("turn: conversation lock released");
-
-        if let crate::state::JobAction::Create(spec) = self.state.check_job_needed().await {
+        if let crate::state::JobAction::Create(spec) = job_action {
             let client = self.state.kube_client().unwrap();
             let addr = self.state.controller_addr().to_owned();
             let ns = self.state.namespace().to_owned();
@@ -167,10 +173,12 @@ impl TightbeamController for ControllerService {
                 }
                 Ok(Err(e)) => {
                     tracing::error!("turn: k8s API rejected Job creation: {e}");
+                    conv.truncate(rollback_len);
                     return Err(Status::internal(format!("failed to create LLM Job: {e}")));
                 }
                 Err(_) => {
                     tracing::error!("turn: k8s API timed out creating Job (10s)");
+                    conv.truncate(rollback_len);
                     return Err(Status::internal(
                         "k8s API timed out creating LLM Job".to_string(),
                     ));
@@ -183,11 +191,15 @@ impl TightbeamController for ControllerService {
                 .wait_for_job_connect(std::time::Duration::from_secs(30))
                 .await
             {
+                conv.truncate(rollback_len);
                 return Err(Status::deadline_exceeded(
                     "LLM Job did not connect within 30s",
                 ));
             }
         }
+
+        drop(conv);
+        tracing::info!("turn: conversation lock released");
 
         tracing::info!("turn: building assignment");
 
@@ -213,6 +225,7 @@ impl TightbeamController for ControllerService {
             .map_err(Status::internal)?;
         tracing::info!("turn: enqueued, returning stream");
 
+        #[allow(clippy::result_large_err)]
         #[allow(clippy::result_large_err)]
         let event_stream = ReceiverStream::new(result_rx)
             .map(|chunk| -> Result<TurnEvent, Status> { Ok(chunk_to_turn_event(chunk)) });

@@ -92,6 +92,41 @@ impl ConversationLog {
         Ok(())
     }
 
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        if len >= self.messages.len() {
+            return;
+        }
+        self.messages.truncate(len);
+        self.rewrite_log();
+    }
+
+    fn rewrite_log(&self) {
+        if let Err(e) = self.rewrite_log_inner() {
+            tracing::error!("failed to rewrite conversation log: {e}");
+        }
+    }
+
+    fn rewrite_log_inner(&self) -> Result<(), String> {
+        let tmp_path = self.log_path.with_extension("ndjson.tmp");
+        let mut file = fs::File::create(&tmp_path)
+            .map_err(|e| format!("failed to create temp log: {e}"))?;
+        for message in &self.messages {
+            let entry = Self::message_to_entry(message);
+            let mut line = serde_json::to_string(&entry)
+                .map_err(|e| format!("failed to serialize: {e}"))?;
+            line.push('\n');
+            file.write_all(line.as_bytes())
+                .map_err(|e| format!("failed to write: {e}"))?;
+        }
+        fs::rename(&tmp_path, &self.log_path)
+            .map_err(|e| format!("failed to rename: {e}"))?;
+        Ok(())
+    }
+
     pub fn history(&self) -> &[Message] {
         &self.messages
     }
@@ -137,12 +172,8 @@ impl ConversationLog {
         Self::write_entry(&self.log_path, message)
     }
 
-    fn write_entry(path: &Path, message: &Message) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("failed to create log dir: {e}"))?;
-        }
-
-        let entry = LogEntry {
+    fn message_to_entry(message: &Message) -> LogEntry {
+        LogEntry {
             ts: Utc::now().to_rfc3339(),
             role: message.role.clone(),
             content: message.content.clone(),
@@ -150,7 +181,15 @@ impl ConversationLog {
             tool_call_id: message.tool_call_id.clone(),
             is_error: message.is_error,
             agent: message.agent.clone(),
-        };
+        }
+    }
+
+    fn write_entry(path: &Path, message: &Message) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("failed to create log dir: {e}"))?;
+        }
+
+        let entry = Self::message_to_entry(message);
 
         let mut line = serde_json::to_string(&entry)
             .map_err(|e| format!("failed to serialize log entry: {e}"))?;
@@ -294,6 +333,24 @@ mod tests {
         let tool_calls = rebuilt.history()[0].tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "bash");
+    }
+
+    #[test]
+    fn truncate_rolls_back_history_and_log() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = ConversationLog::new(tmp.path());
+
+        log.append(text_msg("user", "First")).unwrap();
+        log.append(text_msg("assistant", "Second")).unwrap();
+        log.append(text_msg("user", "Third")).unwrap();
+        assert_eq!(log.len(), 3);
+
+        log.truncate(1);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.history()[0].role, "user");
+
+        let rebuilt = ConversationLog::rebuild(tmp.path()).unwrap();
+        assert_eq!(rebuilt.history().len(), 1);
     }
 
     #[test]

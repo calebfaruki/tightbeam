@@ -11,6 +11,7 @@ pub async fn watch_models(
     client: Client,
     namespace: &str,
     state: Arc<ControllerState>,
+    ready_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<(), String> {
     let api: Api<TightbeamModel> = Api::namespaced(client, namespace);
     let mut stream = watcher::watcher(api, watcher::Config::default()).boxed();
@@ -42,6 +43,7 @@ pub async fn watch_models(
             }
             Event::InitDone => {
                 tracing::info!("model watcher initial sync complete");
+                let _ = ready_tx.send(true);
             }
         }
     }
