@@ -7,34 +7,40 @@ permissions:
   contents: read
 
 jobs:
-  build-daemon:
+  build-controller:
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: tightbeam-daemon-linux-amd64
+            artifact: tightbeam-controller-linux-amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: tightbeam-daemon-linux-arm64
+            artifact: tightbeam-controller-linux-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: tightbeam-daemon-darwin-amd64
+            artifact: tightbeam-controller-darwin-amd64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: tightbeam-daemon-darwin-arm64
+            artifact: tightbeam-controller-darwin-arm64
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: tightbeam-daemon-linux-musl-amd64
+            artifact: tightbeam-controller-linux-musl-amd64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: tightbeam-daemon-linux-musl-arm64
+            artifact: tightbeam-controller-linux-musl-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@d1565eeb874f106d1696ad08faf835331133fe14 # stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install protobuf compiler
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
         run: |
@@ -55,31 +61,33 @@ jobs:
       - name: Build
         run: |
           if [[ "${{ matrix.target }}" == *musl* ]]; then
-            RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p tightbeam-daemon
+            RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p tightbeam-controller
           else
-            cargo build --release --target ${{ matrix.target }} -p tightbeam-daemon
+            cargo build --release --target ${{ matrix.target }} -p tightbeam-controller
           fi
       - name: Rename artifact
-        run: cp target/${{ matrix.target }}/release/tightbeam-daemon ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/tightbeam-controller ${{ matrix.artifact }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
-  build-runtime:
+  build-llm-job:
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            artifact: tightbeam-runtime-linux-musl-amd64
+            artifact: tightbeam-llm-job-linux-musl-amd64
           - target: aarch64-unknown-linux-musl
-            artifact: tightbeam-runtime-linux-musl-arm64
+            artifact: tightbeam-llm-job-linux-musl-arm64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@d1565eeb874f106d1696ad08faf835331133fe14 # stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install musl tools
         run: |
           sudo apt-get update
@@ -92,16 +100,16 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
       - name: Build static binary
         run: |
-          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p tightbeam-runtime
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p tightbeam-llm-job
       - name: Rename artifact
-        run: cp target/${{ matrix.target }}/release/tightbeam ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/tightbeam-llm-job ${{ matrix.artifact }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
   release:
-    needs: [build-daemon, build-runtime]
+    needs: [build-controller, build-llm-job]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -124,16 +132,16 @@ jobs:
       - uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
           subject-path: |
-            artifacts/tightbeam-daemon-*
-            artifacts/tightbeam-runtime-*
+            artifacts/tightbeam-controller-*
+            artifacts/tightbeam-llm-job-*
       - name: Create release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           files: artifacts/*
           generate_release_notes: true
 
-  publish-daemon-image:
-    needs: [build-daemon]
+  publish-controller-image:
+    needs: [build-controller]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -155,15 +163,15 @@ jobs:
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: artifacts
-          file: Dockerfile.daemon
+          file: Dockerfile.controller
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/tightbeam-daemon:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/tightbeam-daemon:latest
+            ghcr.io/${{ github.repository_owner }}/tightbeam-controller:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/tightbeam-controller:latest
 
-  publish-runtime-image:
-    needs: [build-runtime]
+  publish-llm-job-image:
+    needs: [build-llm-job]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -185,9 +193,9 @@ jobs:
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: artifacts
-          file: Dockerfile.runtime
+          file: Dockerfile.llm-job
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/tightbeam-runtime:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/tightbeam-runtime:latest
+            ghcr.io/${{ github.repository_owner }}/tightbeam-llm-job:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/tightbeam-llm-job:latest

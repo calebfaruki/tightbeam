@@ -1,10 +1,12 @@
 pub mod claude;
+pub mod types;
+
+pub use types::*;
 
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use tightbeam_protocol::{Message, StreamData, ToolCall, ToolDefinition};
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -12,35 +14,6 @@ pub enum StreamEvent {
     ToolUseStart { id: String, name: String },
     ToolUseInput { json: String },
     Done { stop_reason: String },
-}
-
-impl StreamEvent {
-    pub fn to_stream_data(&self) -> Option<StreamData> {
-        match self {
-            Self::ContentDelta { text } => Some(StreamData {
-                data_type: "text".into(),
-                text: Some(text.clone()),
-                id: None,
-                name: None,
-                input: None,
-            }),
-            Self::ToolUseStart { id, name } => Some(StreamData {
-                data_type: "tool_use_start".into(),
-                text: None,
-                id: Some(id.clone()),
-                name: Some(name.clone()),
-                input: None,
-            }),
-            Self::ToolUseInput { json } => Some(StreamData {
-                data_type: "tool_use_input".into(),
-                text: Some(json.clone()),
-                id: None,
-                name: None,
-                input: None,
-            }),
-            Self::Done { .. } => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

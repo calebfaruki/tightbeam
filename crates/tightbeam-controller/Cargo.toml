@@ -1,0 +1,33 @@
+[package]
+name = "tightbeam-controller"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tightbeam-controller"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+futures.workspace = true
+k8s-openapi = { version = "0.24", features = ["v1_32"] }
+kube = { version = "0.99", features = ["runtime", "derive"] }
+prost.workspace = true
+schemars = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+tightbeam-proto.workspace = true
+tightbeam-providers.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+tempfile.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
+
+[lints]
+workspace = true

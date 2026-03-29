@@ -1,10 +1,10 @@
-use crate::protocol::{ContentBlock, Message, ToolDefinition};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use tightbeam_providers::types::{ContentBlock, Message, ToolCall};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LogEntry {
@@ -13,7 +13,7 @@ struct LogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<Vec<ContentBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<crate::protocol::ToolCall>>,
+    tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,8 +25,6 @@ struct LogEntry {
 pub struct ConversationLog {
     messages: Vec<Message>,
     system_prompt: Option<String>,
-    local_tools: Vec<ToolDefinition>,
-    mcp_tools: Vec<ToolDefinition>,
     log_path: PathBuf,
 }
 
@@ -36,8 +34,6 @@ impl ConversationLog {
         Self {
             messages: Vec::new(),
             system_prompt: None,
-            local_tools: Vec::new(),
-            mcp_tools: Vec::new(),
             log_path,
         }
     }
@@ -71,8 +67,6 @@ impl ConversationLog {
         Ok(Self {
             messages,
             system_prompt: None,
-            local_tools: Vec::new(),
-            mcp_tools: Vec::new(),
             log_path,
         })
     }
@@ -83,20 +77,6 @@ impl ConversationLog {
 
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
-    }
-
-    pub fn set_tools(&mut self, tools: Vec<ToolDefinition>) {
-        self.local_tools = tools;
-    }
-
-    pub fn set_mcp_tools(&mut self, tools: Vec<ToolDefinition>) {
-        self.mcp_tools = tools;
-    }
-
-    pub fn tools(&self) -> Vec<ToolDefinition> {
-        let mut all = self.local_tools.clone();
-        all.extend(self.mcp_tools.iter().cloned());
-        all
     }
 
     pub fn append(&mut self, message: Message) -> Result<(), String> {
@@ -190,9 +170,10 @@ impl ConversationLog {
 }
 
 #[cfg(test)]
-mod conversation_accumulation {
+mod tests {
     use super::*;
     use tempfile::TempDir;
+    use tightbeam_providers::types::content_text;
 
     fn text_msg(role: &str, text: &str) -> Message {
         Message {
@@ -291,39 +272,6 @@ mod conversation_accumulation {
     }
 
     #[test]
-    fn tool_definitions_cached_across_calls() {
-        let tmp = TempDir::new().unwrap();
-        let mut log = ConversationLog::new(tmp.path());
-
-        assert!(log.tools().is_empty());
-
-        let tools = vec![ToolDefinition {
-            name: "bash".into(),
-            description: "Run a command".into(),
-            parameters: serde_json::json!({"type": "object"}),
-        }];
-        log.set_tools(tools);
-        assert_eq!(log.tools().len(), 1);
-        assert_eq!(log.tools()[0].name, "bash");
-
-        // Updating tools replaces them
-        let new_tools = vec![
-            ToolDefinition {
-                name: "bash".into(),
-                description: "Run a command".into(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-            ToolDefinition {
-                name: "read".into(),
-                description: "Read a file".into(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-        ];
-        log.set_tools(new_tools);
-        assert_eq!(log.tools().len(), 2);
-    }
-
-    #[test]
     fn assistant_with_tool_calls_round_trips() {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(tmp.path());
@@ -331,7 +279,7 @@ mod conversation_accumulation {
         let msg = Message {
             role: "assistant".into(),
             content: None,
-            tool_calls: Some(vec![crate::protocol::ToolCall {
+            tool_calls: Some(vec![ToolCall {
                 id: "tc-001".into(),
                 name: "bash".into(),
                 input: serde_json::json!({"command": "ls"}),
@@ -378,7 +326,10 @@ mod conversation_accumulation {
         };
         log.audit_log(&msg).unwrap();
 
-        assert!(log.history().is_empty(), "audit_log must not add to history");
+        assert!(
+            log.history().is_empty(),
+            "audit_log must not add to history"
+        );
         let audit_path = tmp.path().join("router.ndjson");
         assert!(audit_path.exists(), "audit log file must be created");
         let content = fs::read_to_string(&audit_path).unwrap();
@@ -413,7 +364,7 @@ mod conversation_accumulation {
 
         let history = log.history_for_provider();
         assert_eq!(
-            crate::protocol::content_text(&history[1].content),
+            content_text(&history[1].content),
             Some("Hi there"),
             "single agent should not prefix"
         );
@@ -438,15 +389,15 @@ mod conversation_accumulation {
 
         let history = log.history_for_provider();
         assert_eq!(
-            crate::protocol::content_text(&history[1].content),
+            content_text(&history[1].content),
             Some("[research]: Analysis here"),
         );
         assert_eq!(
-            crate::protocol::content_text(&history[3].content),
+            content_text(&history[3].content),
             Some("[writer]: Draft here"),
         );
         assert_eq!(
-            crate::protocol::content_text(&history[0].content),
+            content_text(&history[0].content),
             Some("Hello"),
             "user messages should not be prefixed"
         );

@@ -1,6 +1,26 @@
 [workspace]
-members = ["crates/tightbeam-daemon", "crates/tightbeam-protocol", "crates/tightbeam-providers", "crates/tightbeam-runtime"]
+members = ["crates/tightbeam-controller", "crates/tightbeam-llm-job", "crates/tightbeam-proto", "crates/tightbeam-providers"]
 resolver = "2"
+
+[workspace.package]
+version = "0.7.0"
+edition = "2021"
+
+[workspace.dependencies]
+async-trait = "0.1"
+futures = "0.3"
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tightbeam-proto = { path = "crates/tightbeam-proto" }
+tightbeam-providers = { path = "crates/tightbeam-providers" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.13"
+tonic-build = "0.13"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [workspace.lints.rust]
 dead_code = "deny"

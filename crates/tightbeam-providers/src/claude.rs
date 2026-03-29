@@ -1,8 +1,8 @@
+use crate::types::{content_text, ContentBlock, Message, ToolDefinition};
 use crate::{LlmProvider, ProviderConfig, StreamEvent};
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 use std::pin::Pin;
-use tightbeam_protocol::{content_text, ContentBlock, Message, ToolDefinition};
 
 pub struct ClaudeProvider {
     client: reqwest::Client,
@@ -269,7 +269,7 @@ fn parse_sse_event(text: &str) -> Option<StreamEvent> {
 #[cfg(test)]
 mod claude_api {
     use super::*;
-    use tightbeam_protocol::ToolCall;
+    use crate::types::ToolCall;
 
     #[test]
     fn user_message_converts_to_api_format() {
