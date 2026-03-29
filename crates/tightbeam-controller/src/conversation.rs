@@ -112,18 +112,17 @@ impl ConversationLog {
 
     fn rewrite_log_inner(&self) -> Result<(), String> {
         let tmp_path = self.log_path.with_extension("ndjson.tmp");
-        let mut file = fs::File::create(&tmp_path)
-            .map_err(|e| format!("failed to create temp log: {e}"))?;
+        let mut file =
+            fs::File::create(&tmp_path).map_err(|e| format!("failed to create temp log: {e}"))?;
         for message in &self.messages {
             let entry = Self::message_to_entry(message);
-            let mut line = serde_json::to_string(&entry)
-                .map_err(|e| format!("failed to serialize: {e}"))?;
+            let mut line =
+                serde_json::to_string(&entry).map_err(|e| format!("failed to serialize: {e}"))?;
             line.push('\n');
             file.write_all(line.as_bytes())
                 .map_err(|e| format!("failed to write: {e}"))?;
         }
-        fs::rename(&tmp_path, &self.log_path)
-            .map_err(|e| format!("failed to rename: {e}"))?;
+        fs::rename(&tmp_path, &self.log_path).map_err(|e| format!("failed to rename: {e}"))?;
         Ok(())
     }
 

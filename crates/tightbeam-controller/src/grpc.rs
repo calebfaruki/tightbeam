@@ -137,9 +137,7 @@ impl TightbeamController for ControllerService {
 
         let job_action = self.state.check_job_needed().await;
         if matches!(job_action, crate::state::JobAction::NoModelSpec) {
-            return Err(Status::failed_precondition(
-                "no TightbeamModel configured",
-            ));
+            return Err(Status::failed_precondition("no TightbeamModel configured"));
         }
 
         let incoming: Vec<provider::Message> = params

@@ -63,9 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             };
-            if let Err(e) =
-                tightbeam_controller::watcher::watch_models(client, &watcher_ns, watcher_state, ready_tx)
-                    .await
+            if let Err(e) = tightbeam_controller::watcher::watch_models(
+                client,
+                &watcher_ns,
+                watcher_state,
+                ready_tx,
+            )
+            .await
             {
                 tracing::error!("model watcher failed: {e}");
             }
