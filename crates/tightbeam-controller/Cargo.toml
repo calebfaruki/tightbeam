@@ -10,10 +10,10 @@ path = "src/main.rs"
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 futures.workspace = true
-k8s-openapi = { version = "0.24", features = ["v1_32"] }
-kube = { version = "0.99", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.27", features = ["v1_32"] }
+kube = { version = "3.1", features = ["runtime", "derive"] }
 prost.workspace = true
-schemars = "0.8"
+schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
 tightbeam-proto.workspace = true
