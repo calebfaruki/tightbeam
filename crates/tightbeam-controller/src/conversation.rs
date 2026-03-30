@@ -96,6 +96,10 @@ impl ConversationLog {
         self.messages.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
     pub fn truncate(&mut self, len: usize) {
         if len >= self.messages.len() {
             return;
