@@ -97,7 +97,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_serving::<TightbeamControllerServer<ControllerService>>()
         .await;
 
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(tightbeam_proto::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+
     Server::builder()
+        .add_service(reflection_service)
         .add_service(health_service)
         .add_service(TightbeamControllerServer::new(service))
         .serve(addr)

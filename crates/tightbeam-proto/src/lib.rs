@@ -7,6 +7,8 @@ pub mod tightbeam {
 
 pub use tightbeam::v1::*;
 
+pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("tightbeam_descriptor");
+
 #[cfg(test)]
 mod proto_types {
     use super::*;
