@@ -158,11 +158,12 @@ impl TightbeamController for ControllerService {
             let client = self.state.kube_client().unwrap();
             let addr = self.state.controller_addr().to_owned();
             let ns = self.state.namespace().to_owned();
+            let image = self.state.llm_job_image().to_owned();
 
             tracing::info!("turn: no LLM Job connected, creating one");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                crate::job::create_llm_job(client, "default", &spec, &addr, &ns),
+                crate::job::create_llm_job(client, "default", &spec, &image, &addr, &ns),
             )
             .await
             {
@@ -223,7 +224,6 @@ impl TightbeamController for ControllerService {
             .map_err(Status::internal)?;
         tracing::info!("turn: enqueued, returning stream");
 
-        #[allow(clippy::result_large_err)]
         #[allow(clippy::result_large_err)]
         let event_stream = ReceiverStream::new(result_rx)
             .map(|chunk| -> Result<TurnEvent, Status> { Ok(chunk_to_turn_event(chunk)) });

@@ -1,8 +1,7 @@
 mod config;
 
-use config::{load_config, DEFAULT_SECRETS_DIR};
+use config::load_config;
 use futures::StreamExt;
-use std::path::Path;
 use tightbeam_proto::convert::{
     proto_message_to_provider, proto_tool_def_to_provider, provider_stop_reason_to_proto,
     stream_event_to_chunk,
@@ -18,15 +17,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
         .unwrap_or_else(|_| "http://127.0.0.1:9090".into());
 
-    let secrets_dir =
-        std::env::var("TIGHTBEAM_SECRETS_DIR").unwrap_or_else(|_| DEFAULT_SECRETS_DIR.into());
-
     let job_id = std::env::var("TIGHTBEAM_JOB_ID").unwrap_or_else(|_| "local".into());
 
     let model_name = std::env::var("TIGHTBEAM_MODEL_NAME").unwrap_or_else(|_| "default".into());
 
-    let (provider_enum, config) = load_config(Path::new(&secrets_dir))?;
-    let llm = provider_enum.build();
+    let (format, base_url, config) = load_config()?;
+    let llm = format.build(&base_url);
 
     tracing::info!(
         "connecting to controller at {controller_addr}, job_id={job_id}, model={model_name}"
@@ -134,15 +130,23 @@ async fn process_turn(
 
     let tool_calls = tightbeam_providers::collect_tool_calls(&events);
     let text = tightbeam_providers::collect_text(&events);
+    let thinking = tightbeam_providers::collect_thinking(&events);
 
-    let final_content: Vec<tightbeam_proto::ContentBlock> = match text {
-        Some(t) => vec![tightbeam_proto::ContentBlock {
+    let mut final_content: Vec<tightbeam_proto::ContentBlock> = Vec::new();
+    if let Some(t) = thinking {
+        final_content.push(tightbeam_proto::ContentBlock {
+            block: Some(tightbeam_proto::content_block::Block::Thinking(
+                tightbeam_proto::ThinkingBlock { text: t },
+            )),
+        });
+    }
+    if let Some(t) = text {
+        final_content.push(tightbeam_proto::ContentBlock {
             block: Some(tightbeam_proto::content_block::Block::Text(
                 tightbeam_proto::TextBlock { text: t },
             )),
-        }],
-        None => vec![],
-    };
+        });
+    }
 
     let final_tool_calls: Vec<tightbeam_proto::ToolCall> = tool_calls
         .iter()
@@ -170,7 +174,7 @@ async fn process_turn(
         .filter(|c| {
             !matches!(
                 c.chunk,
-                Some(tightbeam_proto::turn_result_chunk::Chunk::Complete(_))
+                Some(tightbeam_proto::turn_result_chunk::Chunk::Complete(_)) | None
             )
         })
         .chain(std::iter::once(complete))

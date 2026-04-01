@@ -40,12 +40,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let namespace = std::env::var("TIGHTBEAM_NAMESPACE").unwrap_or_else(|_| "default".into());
     let controller_addr = std::env::var("TIGHTBEAM_CONTROLLER_ADDR")
         .unwrap_or_else(|_| format!("http://0.0.0.0:{DEFAULT_GRPC_PORT}"));
+    let llm_job_image = std::env::var("TIGHTBEAM_LLM_JOB_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/calebfaruki/tightbeam-llm-job:latest".into());
 
     let state = Arc::new(ControllerState::new(
         conversation,
         kube_client.clone(),
         namespace.clone(),
         controller_addr,
+        llm_job_image,
     ));
 
     if kube_client.is_some() {

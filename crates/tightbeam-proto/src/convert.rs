@@ -74,6 +74,11 @@ pub fn provider_content_to_proto(block: &provider::ContentBlock) -> proto::Conte
                 })),
             }
         }
+        provider::ContentBlock::Thinking { text } => proto::ContentBlock {
+            block: Some(proto::content_block::Block::Thinking(
+                proto::ThinkingBlock { text: text.clone() },
+            )),
+        },
         provider::ContentBlock::FileIncoming { .. } => proto::ContentBlock { block: None },
     }
 }
@@ -91,6 +96,9 @@ pub fn proto_content_to_provider(block: &proto::ContentBlock) -> Option<provider
                 data,
             })
         }
+        Some(proto::content_block::Block::Thinking(t)) => Some(provider::ContentBlock::Thinking {
+            text: t.text.clone(),
+        }),
         None => None,
     }
 }
@@ -151,6 +159,10 @@ pub fn stream_event_to_chunk(event: &tightbeam_providers::StreamEvent) -> proto:
                 },
             )),
         },
+        tightbeam_providers::StreamEvent::ThinkingDelta { .. } => {
+            // Thinking deltas are accumulated by the LLM Job, not streamed.
+            proto::TurnResultChunk { chunk: None }
+        }
         tightbeam_providers::StreamEvent::Done { stop_reason } => {
             let sr = provider::StopReason::from_str_lossy(stop_reason);
             proto::TurnResultChunk {

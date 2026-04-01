@@ -6,19 +6,15 @@ use std::pin::Pin;
 
 pub struct ClaudeProvider {
     client: reqwest::Client,
-}
-
-impl Default for ClaudeProvider {
-    fn default() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
-    }
+    base_url: String,
 }
 
 impl ClaudeProvider {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(base_url: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url,
+        }
     }
 }
 
@@ -35,6 +31,10 @@ fn content_block_to_api(block: &ContentBlock) -> serde_json::Value {
                 "media_type": media_type,
                 "data": data,
             }
+        }),
+        ContentBlock::Thinking { text } => serde_json::json!({
+            "type": "thinking",
+            "thinking": text,
         }),
         ContentBlock::FileIncoming { .. } => {
             panic!("FileIncoming must be replaced before reaching provider")
@@ -140,9 +140,20 @@ impl LlmProvider for ClaudeProvider {
             body.insert("tools".into(), serde_json::Value::Array(api_tools));
         }
 
+        if let Some(ref budget) = config.thinking {
+            body.insert(
+                "thinking".into(),
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget.budget_tokens(),
+                }),
+            );
+        }
+
+        let url = format!("{}/messages", self.base_url);
         let response = self
             .client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(&url)
             .header("x-api-key", &config.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -235,6 +246,10 @@ fn parse_sse_event(text: &str) -> Option<StreamEvent> {
                     let text = delta.get("text")?.as_str()?.to_string();
                     Some(StreamEvent::ContentDelta { text })
                 }
+                "thinking_delta" => {
+                    let text = delta.get("thinking")?.as_str()?.to_string();
+                    Some(StreamEvent::ThinkingDelta { text })
+                }
                 "input_json_delta" => {
                     let json = delta.get("partial_json")?.as_str()?.to_string();
                     Some(StreamEvent::ToolUseInput { json })
@@ -247,12 +262,16 @@ fn parse_sse_event(text: &str) -> Option<StreamEvent> {
             let block = parsed.get("content_block")?;
             let block_type = block.get("type")?.as_str()?;
 
-            if block_type == "tool_use" {
-                let id = block.get("id")?.as_str()?.to_string();
-                let name = block.get("name")?.as_str()?.to_string();
-                Some(StreamEvent::ToolUseStart { id, name })
-            } else {
-                None
+            match block_type {
+                "tool_use" => {
+                    let id = block.get("id")?.as_str()?.to_string();
+                    let name = block.get("name")?.as_str()?.to_string();
+                    Some(StreamEvent::ToolUseStart { id, name })
+                }
+                "thinking" => Some(StreamEvent::ThinkingDelta {
+                    text: String::new(),
+                }),
+                _ => None,
             }
         }
         "message_delta" => {

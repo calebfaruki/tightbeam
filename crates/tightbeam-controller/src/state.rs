@@ -27,6 +27,7 @@ pub struct ControllerState {
     kube_client: Option<kube::Client>,
     namespace: String,
     controller_addr: String,
+    llm_job_image: String,
     model_spec: Mutex<Option<TightbeamModelSpec>>,
 }
 
@@ -36,6 +37,7 @@ impl ControllerState {
         kube_client: Option<kube::Client>,
         namespace: String,
         controller_addr: String,
+        llm_job_image: String,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(1);
         let (subscriber_tx, _) = broadcast::channel(16);
@@ -50,8 +52,13 @@ impl ControllerState {
             kube_client,
             namespace,
             controller_addr,
+            llm_job_image,
             model_spec: Mutex::new(None),
         }
+    }
+
+    pub fn llm_job_image(&self) -> &str {
+        &self.llm_job_image
     }
 
     pub async fn enqueue_turn(&self, pending: PendingTurn) -> Result<(), String> {
@@ -157,7 +164,13 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let conv = ConversationLog::new(tmp.path());
         std::mem::forget(tmp);
-        ControllerState::new(conv, None, "default".into(), "http://localhost:9090".into())
+        ControllerState::new(
+            conv,
+            None,
+            "default".into(),
+            "http://localhost:9090".into(),
+            "ghcr.io/test/llm-job:latest".into(),
+        )
     }
 
     #[tokio::test]
@@ -262,13 +275,11 @@ mod tests {
         let state = make_state();
         state
             .set_model_spec(TightbeamModelSpec {
-                provider: "anthropic".into(),
+                format: "anthropic".into(),
                 model: "claude-sonnet-4-20250514".into(),
-                secret_name: "llm-key".into(),
-                max_tokens: 8192,
-                image: "ghcr.io/test:latest".into(),
-                idle_timeout: 300,
-                description: String::new(),
+                base_url: "https://api.anthropic.com/v1".into(),
+                thinking: None,
+                secret: None,
             })
             .await;
         // kube_client is None, so NoKubeClient takes priority over Create

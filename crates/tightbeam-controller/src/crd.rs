@@ -9,26 +9,24 @@ use serde::{Deserialize, Serialize};
     kind = "TightbeamModel",
     namespaced
 )]
+#[serde(rename_all = "camelCase")]
 pub struct TightbeamModelSpec {
-    pub provider: String,
+    pub format: String,
     pub model: String,
-    #[serde(rename = "secretName")]
-    pub secret_name: String,
-    #[serde(rename = "maxTokens", default = "default_max_tokens")]
-    pub max_tokens: u32,
-    pub image: String,
-    #[serde(rename = "idleTimeout", default = "default_idle_timeout")]
-    pub idle_timeout: u32,
-    #[serde(default)]
-    pub description: String,
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<SecretBinding>,
 }
 
-fn default_max_tokens() -> u32 {
-    8192
-}
-
-fn default_idle_timeout() -> u32 {
-    300
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SecretBinding {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -56,31 +54,45 @@ mod tests {
     #[test]
     fn model_spec_serializes() {
         let spec = TightbeamModelSpec {
-            provider: "anthropic".into(),
+            format: "anthropic".into(),
             model: "claude-sonnet-4-20250514".into(),
-            secret_name: "llm-anthropic-key".into(),
-            max_tokens: 8192,
-            image: "ghcr.io/calebfaruki/tightbeam-llm-job:latest".into(),
-            idle_timeout: 300,
-            description: "Fast model".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+            thinking: Some("high".into()),
+            secret: Some(SecretBinding {
+                name: "anthropic-key".into(),
+                env: Some("API_KEY".into()),
+                file: None,
+            }),
         };
         let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains("\"secretName\":\"llm-anthropic-key\""));
-        assert!(json.contains("\"maxTokens\":8192"));
+        assert!(json.contains("\"baseUrl\":\"https://api.anthropic.com/v1\""));
+        assert!(json.contains("\"thinking\":\"high\""));
     }
 
     #[test]
     fn model_spec_deserializes_with_defaults() {
         let json = r#"{
-            "provider": "anthropic",
+            "format": "anthropic",
             "model": "claude-sonnet-4-20250514",
-            "secretName": "llm-key",
-            "image": "ghcr.io/test:latest"
+            "baseUrl": "https://api.anthropic.com/v1"
         }"#;
         let spec: TightbeamModelSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.max_tokens, 8192);
-        assert_eq!(spec.idle_timeout, 300);
-        assert!(spec.description.is_empty());
+        assert!(spec.thinking.is_none());
+        assert!(spec.secret.is_none());
+    }
+
+    #[test]
+    fn secret_binding_env_and_file() {
+        let json = r#"{"name": "my-secret", "env": "API_KEY"}"#;
+        let binding: SecretBinding = serde_json::from_str(json).unwrap();
+        assert_eq!(binding.name, "my-secret");
+        assert_eq!(binding.env.as_deref(), Some("API_KEY"));
+        assert!(binding.file.is_none());
+
+        let json = r#"{"name": "ssh-key", "file": "/root/.ssh/id_ed25519"}"#;
+        let binding: SecretBinding = serde_json::from_str(json).unwrap();
+        assert_eq!(binding.file.as_deref(), Some("/root/.ssh/id_ed25519"));
+        assert!(binding.env.is_none());
     }
 
     #[test]

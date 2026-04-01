@@ -11,6 +11,7 @@ use std::pin::Pin;
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     ContentDelta { text: String },
+    ThinkingDelta { text: String },
     ToolUseStart { id: String, name: String },
     ToolUseInput { json: String },
     Done { stop_reason: String },
@@ -18,14 +19,17 @@ pub enum StreamEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
-pub enum Provider {
+pub enum Format {
     Anthropic,
+    #[serde(rename = "openai")]
+    OpenAi,
 }
 
-impl Provider {
-    pub fn build(&self) -> Box<dyn LlmProvider> {
+impl Format {
+    pub fn build(&self, base_url: &str) -> Box<dyn LlmProvider> {
         match self {
-            Self::Anthropic => Box::new(claude::ClaudeProvider::new()),
+            Self::Anthropic => Box::new(claude::ClaudeProvider::new(base_url.to_string())),
+            Self::OpenAi => unimplemented!("openai format"),
         }
     }
 }
@@ -34,6 +38,7 @@ pub struct ProviderConfig {
     pub model: String,
     pub api_key: String,
     pub max_tokens: u32,
+    pub thinking: Option<ThinkingBudget>,
 }
 
 #[async_trait]
@@ -79,7 +84,7 @@ pub fn collect_tool_calls(events: &[StreamEvent]) -> Vec<ToolCall> {
                     }
                 }
             }
-            StreamEvent::ContentDelta { .. } => {}
+            StreamEvent::ContentDelta { .. } | StreamEvent::ThinkingDelta { .. } => {}
         }
     }
 
@@ -90,6 +95,20 @@ pub fn collect_text(events: &[StreamEvent]) -> Option<String> {
     let mut text = String::new();
     for event in events {
         if let StreamEvent::ContentDelta { text: t } = event {
+            text.push_str(t);
+        }
+    }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+pub fn collect_thinking(events: &[StreamEvent]) -> Option<String> {
+    let mut text = String::new();
+    for event in events {
+        if let StreamEvent::ThinkingDelta { text: t } = event {
             text.push_str(t);
         }
     }
@@ -199,14 +218,37 @@ mod provider_helpers {
     }
 
     #[test]
-    fn provider_enum_deserializes_from_lowercase() {
-        let p: Provider = serde_json::from_str("\"anthropic\"").unwrap();
-        assert_eq!(p, Provider::Anthropic);
+    fn format_enum_deserializes_from_lowercase() {
+        let f: Format = serde_json::from_str("\"anthropic\"").unwrap();
+        assert_eq!(f, Format::Anthropic);
+        let f: Format = serde_json::from_str("\"openai\"").unwrap();
+        assert_eq!(f, Format::OpenAi);
     }
 
     #[test]
-    fn provider_enum_rejects_unknown() {
-        let result: Result<Provider, _> = serde_json::from_str("\"banana\"");
+    fn format_enum_rejects_unknown() {
+        let result: Result<Format, _> = serde_json::from_str("\"banana\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn collect_thinking_from_deltas() {
+        let events = vec![
+            StreamEvent::ThinkingDelta {
+                text: "Let me ".into(),
+            },
+            StreamEvent::ThinkingDelta {
+                text: "think...".into(),
+            },
+        ];
+        assert_eq!(collect_thinking(&events), Some("Let me think...".into()));
+    }
+
+    #[test]
+    fn collect_thinking_none_when_no_deltas() {
+        let events = vec![StreamEvent::ContentDelta {
+            text: "hello".into(),
+        }];
+        assert_eq!(collect_thinking(&events), None);
     }
 }

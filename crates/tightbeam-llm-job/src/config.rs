@@ -1,131 +1,111 @@
-use std::path::Path;
-use tightbeam_providers::ProviderConfig;
+use tightbeam_providers::{Format, ProviderConfig, ThinkingBudget};
 
-pub(crate) const DEFAULT_SECRETS_DIR: &str = "/run/secrets/llm";
+pub(crate) fn load_config() -> Result<(Format, String, ProviderConfig), String> {
+    let format_str = std::env::var("TIGHTBEAM_FORMAT")
+        .map_err(|_| "TIGHTBEAM_FORMAT must be set".to_string())?;
+    let format: Format = serde_json::from_str(&format!("\"{format_str}\""))
+        .map_err(|e| format!("invalid format \"{format_str}\": {e}"))?;
 
-pub(crate) fn read_secret_file(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path)
-        .map(|s| s.trim().to_string())
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))
-}
+    let model =
+        std::env::var("TIGHTBEAM_MODEL").map_err(|_| "TIGHTBEAM_MODEL must be set".to_string())?;
+    let base_url = std::env::var("TIGHTBEAM_BASE_URL")
+        .map_err(|_| "TIGHTBEAM_BASE_URL must be set".to_string())?;
+    let api_key = std::env::var("API_KEY").unwrap_or_default();
 
-pub(crate) fn load_config(
-    secrets_dir: &Path,
-) -> Result<(tightbeam_providers::Provider, ProviderConfig), String> {
-    let provider_str = read_secret_file(&secrets_dir.join("provider"))?;
-    let provider: tightbeam_providers::Provider =
-        serde_json::from_str(&format!("\"{provider_str}\""))
-            .map_err(|e| format!("invalid provider \"{provider_str}\": {e}"))?;
-
-    let model = read_secret_file(&secrets_dir.join("model"))?;
-    let api_key = read_secret_file(&secrets_dir.join("api-key"))?;
-
-    let max_tokens = match read_secret_file(&secrets_dir.join("max-tokens")) {
-        Ok(val) => val.parse().unwrap_or(8192),
-        Err(_) => 8192,
-    };
+    let thinking = std::env::var("TIGHTBEAM_THINKING")
+        .ok()
+        .and_then(|s| serde_json::from_str::<ThinkingBudget>(&format!("\"{s}\"")).ok());
 
     let config = ProviderConfig {
         model,
         api_key,
-        max_tokens,
+        max_tokens: 8192,
+        thinking,
     };
 
-    Ok((provider, config))
+    Ok((format, base_url, config))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    fn write_file(dir: &Path, name: &str, value: &str) {
-        std::fs::write(dir.join(name), value).unwrap();
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_env() {
+        for key in &[
+            "TIGHTBEAM_FORMAT",
+            "TIGHTBEAM_MODEL",
+            "TIGHTBEAM_BASE_URL",
+            "API_KEY",
+            "TIGHTBEAM_THINKING",
+        ] {
+            std::env::remove_var(key);
+        }
     }
 
-    fn write_valid_secrets(dir: &Path) {
-        write_file(dir, "provider", "anthropic");
-        write_file(dir, "model", "claude-sonnet-4-20250514");
-        write_file(dir, "api-key", "sk-ant-test-123");
-    }
-
-    #[test]
-    fn read_secret_file_trims_whitespace() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_file(tmp.path(), "test", "  hello world  \n");
-        let result = read_secret_file(&tmp.path().join("test")).unwrap();
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn read_secret_file_missing_file_errors() {
-        let result = read_secret_file(Path::new("/nonexistent/file"));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("failed to read"));
+    fn set_required_env() {
+        std::env::set_var("TIGHTBEAM_FORMAT", "anthropic");
+        std::env::set_var("TIGHTBEAM_MODEL", "claude-sonnet-4-20250514");
+        std::env::set_var("TIGHTBEAM_BASE_URL", "https://api.anthropic.com/v1");
     }
 
     #[test]
-    fn load_config_valid_secrets() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_valid_secrets(tmp.path());
-
-        let (provider, config) = load_config(tmp.path()).unwrap();
-        assert_eq!(provider, tightbeam_providers::Provider::Anthropic);
+    fn load_config_valid() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        set_required_env();
+        std::env::set_var("API_KEY", "sk-test");
+        let (format, base_url, config) = load_config().unwrap();
+        assert_eq!(format, Format::Anthropic);
+        assert_eq!(base_url, "https://api.anthropic.com/v1");
         assert_eq!(config.model, "claude-sonnet-4-20250514");
-        assert_eq!(config.api_key, "sk-ant-test-123");
+        assert_eq!(config.api_key, "sk-test");
         assert_eq!(config.max_tokens, 8192);
+        assert!(config.thinking.is_none());
+        clear_env();
     }
 
     #[test]
-    fn load_config_missing_api_key_errors() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_file(tmp.path(), "provider", "anthropic");
-        write_file(tmp.path(), "model", "m");
-
-        match load_config(tmp.path()) {
-            Err(e) => assert!(e.contains("api-key"), "{e}"),
-            Ok(_) => panic!("expected error for missing api-key"),
-        }
+    fn load_config_with_thinking() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        set_required_env();
+        std::env::set_var("TIGHTBEAM_THINKING", "high");
+        let (_, _, config) = load_config().unwrap();
+        assert_eq!(config.thinking, Some(ThinkingBudget::High));
+        clear_env();
     }
 
     #[test]
-    fn load_config_invalid_provider_errors() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_file(tmp.path(), "provider", "banana");
-        write_file(tmp.path(), "model", "m");
-        write_file(tmp.path(), "api-key", "key");
-
-        match load_config(tmp.path()) {
-            Err(e) => assert!(e.contains("invalid provider"), "{e}"),
-            Ok(_) => panic!("expected error for invalid provider"),
-        }
+    fn load_config_missing_format_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("TIGHTBEAM_MODEL", "m");
+        std::env::set_var("TIGHTBEAM_BASE_URL", "http://x");
+        assert!(load_config().is_err());
+        clear_env();
     }
 
     #[test]
-    fn load_config_max_tokens_defaults_when_missing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_valid_secrets(tmp.path());
-
-        let (_, config) = load_config(tmp.path()).unwrap();
-        assert_eq!(config.max_tokens, 8192);
+    fn load_config_invalid_format_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("TIGHTBEAM_FORMAT", "banana");
+        std::env::set_var("TIGHTBEAM_MODEL", "m");
+        std::env::set_var("TIGHTBEAM_BASE_URL", "http://x");
+        assert!(load_config().is_err());
+        clear_env();
     }
 
     #[test]
-    fn load_config_max_tokens_custom() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_valid_secrets(tmp.path());
-        write_file(tmp.path(), "max-tokens", "4096");
-
-        let (_, config) = load_config(tmp.path()).unwrap();
-        assert_eq!(config.max_tokens, 4096);
-    }
-
-    #[test]
-    fn load_config_max_tokens_invalid_defaults() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        write_valid_secrets(tmp.path());
-        write_file(tmp.path(), "max-tokens", "not-a-number");
-
-        let (_, config) = load_config(tmp.path()).unwrap();
-        assert_eq!(config.max_tokens, 8192);
+    fn load_config_api_key_defaults_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        set_required_env();
+        let (_, _, config) = load_config().unwrap();
+        assert!(config.api_key.is_empty());
+        clear_env();
     }
 }

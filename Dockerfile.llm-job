@@ -1,4 +1,0 @@
-FROM scratch
-ARG TARGETARCH
-COPY --chmod=755 tightbeam-llm-job-linux-musl-${TARGETARCH} /usr/local/bin/tightbeam-llm-job
-ENTRYPOINT ["tightbeam-llm-job"]

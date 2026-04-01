@@ -163,9 +163,11 @@ jobs:
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: artifacts
-          file: Dockerfile.controller
+          file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            BINARY=tightbeam-controller
           tags: |
             ghcr.io/${{ github.repository_owner }}/tightbeam-controller:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/tightbeam-controller:latest
@@ -193,9 +195,11 @@ jobs:
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: artifacts
-          file: Dockerfile.llm-job
+          file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            BINARY=tightbeam-llm-job
           tags: |
             ghcr.io/${{ github.repository_owner }}/tightbeam-llm-job:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/tightbeam-llm-job:latest

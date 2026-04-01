@@ -23,6 +23,7 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         None,
         "default".into(),
         "http://localhost:9090".into(),
+        "ghcr.io/test/llm-job:latest".into(),
     ));
     let service = ControllerService::new(state.clone());
 

@@ -7,6 +7,7 @@ message ContentBlock {
   oneof block {
     TextBlock text = 1;
     ImageBlock image = 2;
+    ThinkingBlock thinking = 3;
   }
 }
 
@@ -17,6 +18,10 @@ message TextBlock {
 message ImageBlock {
   string media_type = 1;
   bytes data = 2;
+}
+
+message ThinkingBlock {
+  string text = 1;
 }
 
 message ToolDefinition {
