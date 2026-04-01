@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod openai;
 pub mod types;
 
 pub use types::*;
@@ -29,7 +30,7 @@ impl Format {
     pub fn build(&self, base_url: &str) -> Box<dyn LlmProvider> {
         match self {
             Self::Anthropic => Box::new(claude::ClaudeProvider::new(base_url.to_string())),
-            Self::OpenAi => unimplemented!("openai format"),
+            Self::OpenAi => Box::new(openai::OpenAiProvider::new(base_url.to_string())),
         }
     }
 }
