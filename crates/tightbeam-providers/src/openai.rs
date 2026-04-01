@@ -176,12 +176,22 @@ impl LlmProvider for OpenAiProvider {
 fn parse_sse_stream(
     response: reqwest::Response,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, String>> + Send>> {
+    use std::collections::VecDeque;
     let byte_stream = response.bytes_stream();
 
     let event_stream = stream::unfold(
-        (byte_stream, String::new(), HashSet::<u64>::new()),
-        |(mut byte_stream, mut buffer, mut seen_tool_indices)| async move {
+        (
+            byte_stream,
+            String::new(),
+            HashSet::<u64>::new(),
+            VecDeque::<StreamEvent>::new(),
+        ),
+        |(mut byte_stream, mut buffer, mut seen_tool_indices, mut pending)| async move {
             use futures::TryStreamExt;
+
+            if let Some(event) = pending.pop_front() {
+                return Some((Ok(event), (byte_stream, buffer, seen_tool_indices, pending)));
+            }
 
             loop {
                 if let Some(pos) = buffer.find("\n\n") {
@@ -192,21 +202,11 @@ fn parse_sse_stream(
                     if !events.is_empty() {
                         let mut iter = events.into_iter();
                         let first = iter.next().unwrap();
-                        // Re-queue remaining events by prepending synthetic entries
-                        // Actually, return the first and buffer the rest
-                        // For simplicity, flatten: return first, rest go next iteration
-                        // This is fine because multiple tool calls in one chunk is rare
-                        for extra in iter {
-                            // Push back as if they were separate events
-                            // Since we can only return one at a time from unfold,
-                            // prepend them as synthetic buffer entries
-                            buffer = format!("data: __synthetic_event__\n\n{buffer}");
-                            // Actually this approach is wrong. Let's use a VecDeque.
-                            // For now, just emit first and drop extras.
-                            // Multiple tool calls per chunk is extremely rare in practice.
-                            let _ = extra;
-                        }
-                        return Some((Ok(first), (byte_stream, buffer, seen_tool_indices)));
+                        pending.extend(iter);
+                        return Some((
+                            Ok(first),
+                            (byte_stream, buffer, seen_tool_indices, pending),
+                        ));
                     }
                     continue;
                 }
@@ -219,8 +219,13 @@ fn parse_sse_stream(
                         if !buffer.trim().is_empty() {
                             let events = parse_sse_event(&buffer, &mut seen_tool_indices);
                             buffer.clear();
-                            if let Some(first) = events.into_iter().next() {
-                                return Some((Ok(first), (byte_stream, buffer, seen_tool_indices)));
+                            let mut iter = events.into_iter();
+                            if let Some(first) = iter.next() {
+                                pending.extend(iter);
+                                return Some((
+                                    Ok(first),
+                                    (byte_stream, buffer, seen_tool_indices, pending),
+                                ));
                             }
                         }
                         return None;
@@ -228,7 +233,7 @@ fn parse_sse_stream(
                     Err(e) => {
                         return Some((
                             Err(format!("stream error: {e}")),
-                            (byte_stream, buffer, seen_tool_indices),
+                            (byte_stream, buffer, seen_tool_indices, pending),
                         ));
                     }
                 }
