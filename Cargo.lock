@@ -2189,7 +2189,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam-controller"
-version = "0.7.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "futures",
@@ -2213,7 +2213,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam-llm-job"
-version = "0.7.0"
+version = "0.10.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam-proto"
-version = "0.7.0"
+version = "0.10.0"
 dependencies = [
  "base64",
  "prost",
@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam-providers"
-version = "0.7.0"
+version = "0.10.0"
 dependencies = [
  "async-trait",
  "futures",
