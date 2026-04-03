@@ -42,8 +42,6 @@ pub struct TightbeamChannelSpec {
     #[serde(rename = "secretName")]
     pub secret_name: String,
     pub image: String,
-    #[serde(rename = "targetModel", default)]
-    pub target_model: String,
 }
 
 #[cfg(test)]
@@ -101,12 +99,10 @@ mod tests {
             channel_type: "discord".into(),
             secret_name: "discord-bot-token".into(),
             image: "ghcr.io/calebfaruki/tightbeam-channel-discord:latest".into(),
-            target_model: "claude-sonnet".into(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains("\"type\":\"discord\""));
         assert!(json.contains("\"secretName\":\"discord-bot-token\""));
-        assert!(json.contains("\"targetModel\":\"claude-sonnet\""));
     }
 
     #[test]
@@ -116,8 +112,7 @@ mod tests {
             "secretName": "token",
             "image": "ghcr.io/test:latest"
         }"#;
-        let spec: TightbeamChannelSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.target_model.is_empty());
+        let _spec: TightbeamChannelSpec = serde_json::from_str(json).unwrap();
     }
 
     #[test]

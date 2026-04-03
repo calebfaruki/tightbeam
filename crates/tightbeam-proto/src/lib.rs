@@ -57,11 +57,6 @@ mod proto_types {
             system: Some("You are helpful.".into()),
             tools: vec![],
             messages: vec![],
-            model_config: Some(ModelConfig {
-                provider: "anthropic".into(),
-                model: "claude-sonnet-4-20250514".into(),
-                max_tokens: 8192,
-            }),
         };
     }
 

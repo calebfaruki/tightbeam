@@ -92,13 +92,6 @@ message TurnAssignment {
   optional string system = 1;
   repeated ToolDefinition tools = 2;
   repeated Message messages = 3;
-  ModelConfig model_config = 4;
-}
-
-message ModelConfig {
-  string provider = 1;
-  string model = 2;
-  uint32 max_tokens = 3;
 }
 
 message TurnResultChunk {

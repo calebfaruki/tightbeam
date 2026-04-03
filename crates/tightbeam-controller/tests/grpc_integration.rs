@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use tightbeam_controller::conversation::ConversationLog;
+use tightbeam_controller::crd::TightbeamModelSpec;
 use tightbeam_controller::grpc::ControllerService;
 use tightbeam_controller::state::ControllerState;
 use tightbeam_proto::tightbeam_controller_client::TightbeamControllerClient;
@@ -25,6 +26,19 @@ async fn start_server() -> (String, Arc<ControllerState>) {
         "http://localhost:9090".into(),
         "ghcr.io/test/llm-job:latest".into(),
     ));
+    state
+        .set_model_spec(
+            "default".into(),
+            TightbeamModelSpec {
+                format: "anthropic".into(),
+                model: "claude-sonnet-4-20250514".into(),
+                base_url: "https://api.anthropic.com/v1".into(),
+                thinking: None,
+                secret: None,
+            },
+        )
+        .await;
+
     let service = ControllerService::new(state.clone());
 
     tokio::spawn(async move {
@@ -65,7 +79,7 @@ async fn get_turn_returns_unimplemented_when_no_pending() {
         std::time::Duration::from_millis(100),
         client.get_turn(GetTurnRequest {
             job_id: "job-1".into(),
-            model_name: "claude-sonnet".into(),
+            model_name: "default".into(),
         }),
     )
     .await;

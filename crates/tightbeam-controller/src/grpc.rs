@@ -56,23 +56,33 @@ impl ControllerService {
 impl TightbeamController for ControllerService {
     async fn get_turn(
         &self,
-        _request: Request<GetTurnRequest>,
+        request: Request<GetTurnRequest>,
     ) -> Result<Response<TurnAssignment>, Status> {
-        tracing::info!("get_turn: marking job connected");
-        self.state.set_job_connected(true).await;
+        let req = request.into_inner();
+        let model = if req.model_name.is_empty() {
+            "default".to_string()
+        } else {
+            req.model_name
+        };
 
-        tracing::info!("get_turn: waiting for pending turn");
+        tracing::info!(model = %model, "get_turn: marking job connected");
+        self.state.set_job_connected(&model, true).await;
+
+        tracing::info!(model = %model, "get_turn: waiting for pending turn");
         let pending = self
             .state
-            .wait_for_turn()
+            .wait_for_turn(&model)
             .await
             .ok_or_else(|| Status::unavailable("controller shutting down"))?;
 
         tracing::info!(
+            model = %model,
             "get_turn: received assignment with {} messages",
             pending.assignment.messages.len()
         );
-        self.state.set_active_result_tx(pending.result_tx).await;
+        self.state
+            .set_active_result_tx(&model, pending.result_tx)
+            .await;
 
         Ok(Response::new(pending.assignment))
     }
@@ -84,7 +94,7 @@ impl TightbeamController for ControllerService {
         tracing::info!("stream_turn_result: entry");
         let result_tx = self
             .state
-            .take_active_result_tx()
+            .take_active_result_tx_any()
             .await
             .ok_or_else(|| Status::failed_precondition("no active turn"))?;
 
@@ -126,8 +136,12 @@ impl TightbeamController for ControllerService {
     ) -> Result<Response<Self::TurnStream>, Status> {
         tracing::info!("turn: entry");
         let params = request.into_inner();
+        let model = params
+            .model
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "default".to_string());
 
-        tracing::info!("turn: acquiring conversation write lock");
+        tracing::info!(model = %model, "turn: acquiring conversation write lock");
         let mut conv = self.state.conversation.write().await;
         tracing::info!("turn: lock acquired");
 
@@ -135,9 +149,11 @@ impl TightbeamController for ControllerService {
             conv.set_system_prompt(system);
         }
 
-        let job_action = self.state.check_job_needed().await;
+        let job_action = self.state.check_job_needed(&model).await;
         if matches!(job_action, crate::state::JobAction::NoModelSpec) {
-            return Err(Status::failed_precondition("no TightbeamModel configured"));
+            return Err(Status::failed_precondition(format!(
+                "no TightbeamModel configured for '{model}'"
+            )));
         }
 
         let incoming: Vec<provider::Message> = params
@@ -160,10 +176,10 @@ impl TightbeamController for ControllerService {
             let ns = self.state.namespace().to_owned();
             let image = self.state.llm_job_image().to_owned();
 
-            tracing::info!("turn: no LLM Job connected, creating one");
+            tracing::info!(model = %model, "turn: no LLM Job connected, creating one");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                crate::job::create_llm_job(client, "default", &spec, &image, &addr, &ns),
+                crate::job::create_llm_job(client, &model, &spec, &image, &addr, &ns),
             )
             .await
             {
@@ -184,10 +200,10 @@ impl TightbeamController for ControllerService {
                 }
             }
 
-            tracing::info!("turn: waiting for Job to connect");
+            tracing::info!(model = %model, "turn: waiting for Job to connect");
             if !self
                 .state
-                .wait_for_job_connect(std::time::Duration::from_secs(30))
+                .wait_for_job_connect(&model, std::time::Duration::from_secs(30))
                 .await
             {
                 conv.truncate(rollback_len);
@@ -208,7 +224,6 @@ impl TightbeamController for ControllerService {
             system,
             tools: params.tools,
             messages: proto_messages,
-            model_config: None,
         };
 
         let (result_tx, result_rx) = mpsc::channel(64);
@@ -217,9 +232,9 @@ impl TightbeamController for ControllerService {
             result_tx,
         };
 
-        tracing::info!("turn: enqueueing turn");
+        tracing::info!(model = %model, "turn: enqueueing turn");
         self.state
-            .enqueue_turn(pending)
+            .enqueue_turn(&model, pending)
             .await
             .map_err(Status::internal)?;
         tracing::info!("turn: enqueued, returning stream");

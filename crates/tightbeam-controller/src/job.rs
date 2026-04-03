@@ -262,7 +262,6 @@ mod tests {
             channel_type: "discord".into(),
             secret_name: "discord-bot-token".into(),
             image: "ghcr.io/calebfaruki/tightbeam-channel-discord:latest".into(),
-            target_model: "claude-sonnet".into(),
         }
     }
 
