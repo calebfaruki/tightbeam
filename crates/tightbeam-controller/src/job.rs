@@ -95,7 +95,7 @@ pub fn build_llm_job(
                 value_from: Some(EnvVarSource {
                     secret_key_ref: Some(SecretKeySelector {
                         name: secret.name.clone(),
-                        key: "api-key".into(),
+                        key: secret.name.clone(),
                         ..Default::default()
                     }),
                     ..Default::default()
